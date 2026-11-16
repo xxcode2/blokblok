@@ -143,8 +143,9 @@ export function Menu(props: MenuProps): React.ReactElement {
         </div>
 
         <p className="menu-foot">
-          Race to the Top: reach the opposite goal row first. WASD / arrows to move, drag a grid edge to place a
-          blockade, <b>B</b> for quick place. Blockades cost energy — and can never trap a player.
+          Turn-based: one action per turn — move or place a blockade — 30 s per turn. WASD / arrows to
+          move, drag a grid edge to place a blockade, <b>B</b> for quick place. Blockades cost energy —
+          and can never trap a player.
         </p>
       </div>
     </div>

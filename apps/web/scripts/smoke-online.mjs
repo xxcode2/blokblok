@@ -1,22 +1,24 @@
-// Online smoke test for the BLOCKADE ARENA web track.
+// Online smoke test for the BLOCKADE ARENA web track — turn-based protocol 1.1.0.
 // Drives the exact protocol from DEVELOPMENT.md through a running server
 // (ws://localhost:3001 by default) with two WebSocket clients, using the
 // shared core engine to pick legal moves. No browser needed.
 //
+// Turn model: turn 1 belongs to P1 (blue, the room creator). Each turn is
+// exactly ONE action — a move or a blockade — then the turn passes; the
+// server confirms the pass with a `turn` delta event. Out-of-turn input is
+// rejected with NOT_YOUR_TURN. A walks to the goal; B places blockades far
+// from A's path (or sidesteps when out of energy/spots).
+//
 //   node apps/web/scripts/smoke-online.mjs [ws://localhost:3001]
 //
 // Exit 0 = full flow verified (create, join, ready, start, countdown,
-// matchStart, move, place, delta, result). Exit 1 = failure, with the step
-// that failed printed.
+// matchStart, NOT_YOUR_TURN rejection, place, alternating turns, result).
+// Exit 1 = failure, with the step that failed printed.
 
-import { GameEngine } from "../../../packages/core/dist/index.js";
+import { GameEngine, PROTOCOL_VERSION } from "../../../packages/core/dist/index.js";
 
 const URL = process.argv[2] ?? "ws://localhost:3001";
-const TIMEOUT_MS = 30000;
-
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
+const TIMEOUT_MS = 60000;
 
 class Client {
   constructor(name) {
@@ -24,22 +26,27 @@ class Client {
     this.ws = null;
     this.playerId = null;
     this.queue = [];
-    this.waiters = [];
+    this.waiters = []; // { pred, resolve, timer } — persist until they match
+    this.seq = 0;
   }
 
   connect() {
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(URL);
       this.ws.addEventListener("open", () => {
-        this.send({ type: "hello", name: this.name, clientVersion: "1.0.0" });
+        this.send({ type: "hello", name: this.name, clientVersion: PROTOCOL_VERSION });
         resolve();
       });
       this.ws.addEventListener("message", (ev) => {
         const msg = JSON.parse(ev.data);
         if (msg.type === "welcome") this.playerId = msg.playerId;
         this.queue.push(msg);
-        const ws = this.waiters.splice(0);
-        for (const w of ws) w(msg);
+        for (const w of [...this.waiters]) {
+          if (w.pred(msg)) {
+            this.waiters = this.waiters.filter((x) => x !== w);
+            w.resolve(msg);
+          }
+        }
       });
       this.ws.addEventListener("error", () => reject(new Error(`${this.name}: connect failed (${URL})`)));
     });
@@ -49,18 +56,52 @@ class Client {
     this.ws.send(JSON.stringify(msg));
   }
 
-  /** Wait for the next message of `type` (checks the backlog first). */
-  waitFor(type, timeoutMs = 8000) {
-    const found = this.queue.find((m) => m.type === type);
+  /** Send an input with this client's own sequence number. */
+  input(fields) {
+    this.send({ type: "input", seq: ++this.seq, ...fields });
+  }
+
+  /** Wait for the next message matching `pred` (checks the backlog first).
+   *  Only for one-shot message types — never for repeating turn events. */
+  waitForMsg(pred, timeoutMs, label) {
+    const found = this.queue.find(pred);
     if (found) return Promise.resolve(found);
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`${this.name}: timed out waiting for ${type}`)), timeoutMs);
-      this.waiters.push((msg) => {
-        if (msg.type === type) {
-          clearTimeout(timer);
-          resolve(msg);
-        }
-      });
+      const entry = { pred, resolve: null, timer: null };
+      entry.timer = setTimeout(() => {
+        this.waiters = this.waiters.filter((w) => w !== entry);
+        reject(new Error(`${this.name}: timed out waiting for ${label}`));
+      }, timeoutMs);
+      entry.resolve = (msg) => {
+        clearTimeout(entry.timer);
+        resolve(msg);
+      };
+      this.waiters.push(entry);
+    });
+  }
+
+  waitFor(type, timeoutMs = 8000) {
+    return this.waitForMsg((m) => m.type === type, timeoutMs, type);
+  }
+
+  /** Wait until the server confirms the turn passed to `playerId` — via a
+   *  `turn` delta event or a `state` snapshot. No backlog scan: turn events
+   *  repeat every turn, so only messages arriving from now on count. */
+  waitForTurn(playerId, timeoutMs = 8000) {
+    const pred = (m) =>
+      (m.type === "delta" && m.events.some((e) => e.k === "turn" && e.activePlayerId === playerId)) ||
+      (m.type === "state" && m.snapshot.activePlayerId === playerId);
+    return new Promise((resolve, reject) => {
+      const entry = { pred, resolve: null, timer: null };
+      entry.timer = setTimeout(() => {
+        this.waiters = this.waiters.filter((w) => w !== entry);
+        reject(new Error(`${this.name}: timed out waiting for turn -> ${playerId}`));
+      }, timeoutMs);
+      entry.resolve = (msg) => {
+        clearTimeout(entry.timer);
+        resolve(msg);
+      };
+      this.waiters.push(entry);
     });
   }
 
@@ -105,7 +146,7 @@ try {
 
   a.send({ type: "ready", ready: true });
   b.send({ type: "ready", ready: true });
-  await sleep(300);
+  await new Promise((r) => setTimeout(r, 300));
   step("ready x2");
 
   a.send({ type: "start" });
@@ -119,34 +160,102 @@ try {
   if (start.snapshot.status !== "playing") throw new Error(`bad status: ${start.snapshot.status}`);
   if (startB.snapshot.players.length !== 2) throw new Error("matchStart missing players");
 
-  // Track the live state locally with the core engine so our moves are legal.
-  const mirror = GameEngine.fromSnapshot(start.snapshot);
   const aId = a.playerId;
   const bId = b.playerId;
-  let seq = 0;
-
-  // B places a blockade far from A's column-6 walking path (A will cross
-  // h-edge (6,6), so the wall goes at cols 0-1 instead).
-  const placeRes = mirror.place(bId, { row: 6, col: 0, orientation: "h", len: 2 });
-  if (!placeRes.ok) throw new Error(`mirror place failed: ${placeRes.code}`);
-  b.send({ type: "input", seq: ++seq, kind: "place", edge: { row: 6, col: 0, orientation: "h", len: 2 } });
-  const delta = await a.waitFor("delta");
-  const blockadeEvent = delta.events.find((e) => e.k === "blockade");
-  if (!blockadeEvent) throw new Error("no blockade event in delta");
-  step(`place -> delta blockade ${blockadeEvent.blockade.id}`);
-
-  // A walks to the goal: up x10, left, up (B spawns on (0,6)).
-  const moves = ["up", "up", "up", "up", "up", "up", "up", "up", "up", "up", "left", "up"];
-  for (const dir of moves) {
-    const res = mirror.move(aId, dir);
-    if (!res.ok) throw new Error(`mirror move ${dir} failed: ${res.code}`);
-    a.send({ type: "input", seq: ++seq, kind: "move", dir });
-    await sleep(220); // respect the 150ms move cooldown
-    mirror.tickMs(220);
+  // Turn 1 belongs to P1 (blue) — the room creator.
+  const p1Id = start.snapshot.players.find((p) => p.color === "blue")?.id;
+  if (p1Id !== aId) throw new Error(`expected room creator to be P1 (blue), got P1=${p1Id} A=${aId}`);
+  if (start.snapshot.activePlayerId !== aId) throw new Error(`expected turn 1 active=${aId}, got ${start.snapshot.activePlayerId}`);
+  if (start.snapshot.turnNumber !== 1) throw new Error(`expected turnNumber 1, got ${start.snapshot.turnNumber}`);
+  if (!(start.snapshot.turnDeadlineMs > Date.now())) {
+    throw new Error(`expected turnDeadlineMs in the future, got ${start.snapshot.turnDeadlineMs}`);
   }
-  step(`move x${moves.length} (walked A to the goal row)`);
+  step(`turn 1 = A (P1/blue), turnNumber=1, deadline in ~${Math.round((start.snapshot.turnDeadlineMs - Date.now()) / 1000)}s`);
 
-  const result = await a.waitFor("result", 10000);
+  // Track the live state locally with the core engine so our moves are legal.
+  // The mirror is kept in lockstep by applying the exact actions we send, in
+  // order — it is never ticked with wall-clock time (its turn clock is
+  // unanchored after fromSnapshot; only move/place/validate are used).
+  let mirror = GameEngine.fromSnapshot(start.snapshot);
+
+  // B tries to move out of turn (turn 1 is A's): expect NOT_YOUR_TURN.
+  b.input({ kind: "move", dir: "down" });
+  const err = await b.waitForMsg((m) => m.type === "error" && m.code === "NOT_YOUR_TURN", 5000, "NOT_YOUR_TURN error");
+  if (!err) throw new Error("expected a NOT_YOUR_TURN error");
+  step("out-of-turn move -> NOT_YOUR_TURN (turn did not pass)");
+
+  // Play alternating turns until someone wins. A walks to the goal; B places
+  // blockades far from A's column-6 path (or sidesteps when it cannot place).
+  // A's driver takes the next step toward the goal, falling back to a
+  // sidestep when the goal cell is occupied by B (nextStepTowardGoal returns
+  // null head-on — a human would step around, and so must the script).
+  const resultWait = a.waitFor("result", 55000);
+  const safeSpots = [
+    { row: 6, col: 0, orientation: "h", len: 2 },
+    { row: 3, col: 0, orientation: "h", len: 2 },
+    { row: 9, col: 0, orientation: "h", len: 2 },
+    { row: 6, col: 9, orientation: "h", len: 2 },
+    { row: 3, col: 9, orientation: "h", len: 2 },
+    { row: 9, col: 9, orientation: "h", len: 2 },
+    { row: 6, col: 4, orientation: "v", len: 2 },
+    { row: 3, col: 4, orientation: "v", len: 2 },
+  ];
+  let spotIdx = 0;
+  let bSide = "left";
+  let turnsPlayed = 0;
+  let blockadesPlaced = 0;
+
+  /** A's next move: shortest-path step, or a sidestep if the goal cell (or
+   *  the only shortest-path cell) is occupied by B. */
+  function aNextMove() {
+    const dir = mirror.nextStepTowardGoal(aId);
+    if (dir) return dir;
+    const legal = mirror.legalMoves(aId);
+    const side = ["left", "right", "down", "up"].find((d) => legal.includes(d));
+    if (!side) throw new Error("A has no legal move at all");
+    return side;
+  }
+
+  while (mirror.snapshot().status !== "finished") {
+    const ms = mirror.snapshot();
+    if (ms.activePlayerId === aId) {
+      const dir = aNextMove();
+      const res = mirror.move(aId, dir);
+      if (!res.ok) throw new Error(`mirror move ${dir} failed: ${res.code}`);
+      a.input({ kind: "move", dir });
+      turnsPlayed++;
+      if (mirror.snapshot().status === "finished") break;
+      await a.waitForTurn(bId);
+    } else {
+      // B's turn: place at the next safe spot, else sidestep along row 0.
+      let acted = false;
+      while (spotIdx < safeSpots.length && !acted) {
+        const edge = safeSpots[spotIdx++];
+        const res = mirror.place(bId, edge);
+        if (res.ok) {
+          b.input({ kind: "place", edge });
+          blockadesPlaced++;
+          acted = true;
+        }
+      }
+      if (!acted) {
+        const legal = mirror.legalMoves(bId);
+        const side = legal.includes(bSide) ? bSide : legal.includes("left") ? "left" : legal.includes("right") ? "right" : legal[0];
+        if (!side) throw new Error("B has no legal action on its turn");
+        const res = mirror.move(bId, side);
+        if (!res.ok) throw new Error(`mirror sidestep ${side} failed: ${res.code}`);
+        b.input({ kind: "move", dir: side });
+        bSide = side === "left" ? "right" : "left";
+        acted = true;
+      }
+      turnsPlayed++;
+      if (mirror.snapshot().status === "finished") break;
+      await b.waitForTurn(aId);
+    }
+  }
+  step(`alternating turns played (${turnsPlayed} actions, ${blockadesPlaced} blockades by B)`);
+
+  const result = await resultWait;
   step(`result winnerId=${result.winnerId} reason=${result.reason} scores=${JSON.stringify(result.scores)}`);
   if (result.winnerId !== aId) throw new Error(`expected A to win, winner was ${result.winnerId}`);
   if (result.reason !== "goal") throw new Error(`expected reason goal, got ${result.reason}`);

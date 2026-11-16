@@ -186,8 +186,8 @@ export function App(): React.ReactElement {
           setError(null);
           break;
         case "error": {
-          // Routine rejections (cooldown / illegal move) are feedback, not errors.
-          if (msg.code === "INVALID_MOVE" || msg.code === "ON_COOLDOWN") break;
+          // Routine rejections (illegal move) are feedback, not errors.
+          if (msg.code === "INVALID_MOVE") break;
           const label =
             msg.code === "ROOM_NOT_FOUND"
               ? "Room not found — check the code."
@@ -197,7 +197,9 @@ export function App(): React.ReactElement {
                   ? "Not enough energy ⚡"
                   : msg.code === "NO_PATH"
                     ? "That would trap a player — illegal."
-                    : msg.message;
+                    : msg.code === "NOT_YOUR_TURN"
+                      ? "Not your turn yet — wait for the turn banner."
+                      : msg.message;
           if (screenRef.current === "game") {
             setServerError(label);
             window.setTimeout(() => setServerError(null), 3000);
@@ -248,6 +250,10 @@ export function App(): React.ReactElement {
     const eng = new Engine({ gridSize: c.gridSize, durationSec: c.durationSec });
     eng.addPlayer("p1", c.name);
     eng.addPlayer("p2", `AI · ${diff}`);
+    // Turn-based (protocol 1.1.0): start() arms turn 1 (P1) with its 30 s
+    // deadline — required before any tickMs/move, otherwise the engine's
+    // turn clock is unanchored.
+    eng.start(Date.now());
     choicesRef.current = c;
     rematchRef.current = "practice";
     setRematchLabel("Practice again");
@@ -268,6 +274,10 @@ export function App(): React.ReactElement {
     const eng = new Engine({ gridSize: c.gridSize, durationSec: c.durationSec });
     eng.addPlayer("p1", `${c.name} · P1`);
     eng.addPlayer("p2", `${c.name} · P2`);
+    // Turn-based (protocol 1.1.0): start() arms turn 1 (P1) with its 30 s
+    // deadline — required before any tickMs/move, otherwise the engine's
+    // turn clock is unanchored.
+    eng.start(Date.now());
     choicesRef.current = c;
     rematchRef.current = "local2p";
     setRematchLabel("Play again (local 2P)");

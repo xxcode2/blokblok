@@ -8,10 +8,18 @@
 // - Online: snapshots/deltas from the server; the renderer glides orbs
 //   between cells (150 ms easeOutCubic) and reconciles optimistically
 //   predicted moves when the authoritative state arrives.
+// - Turn-based (protocol 1.1.0): ONE action per turn — move 1 cell OR place
+//   1 blockade — then the turn passes (30 s per turn, auto-pass on timeout).
+//   Out-of-turn input is ignored and the board dims; there are no cooldowns,
+//   no input buffering, and no hold-to-glide: every action is one discrete
+//   tap / keypress / swipe. The turn-timer bar is updated every animation
+//   frame from turnDeadlineMs inside this same rAF loop (no second timer).
+// - Practice: the AI acts exactly ONCE per AI turn, ~500 ms after the turn
+//   starts, via one chooseAiAction call.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Dir, Edge, GameEngine, Orientation, Snapshot } from "@blockade/core";
-import { GameEngine as Engine, blockadeCost } from "@blockade/core";
+import { GameEngine as Engine, TURN_DURATION_MS, blockadeCost } from "@blockade/core";
 import type { AiDifficulty } from "../ai";
 import { chooseAiAction } from "../ai";
 import type { NetClient } from "../net";
@@ -41,9 +49,13 @@ export interface GameProps {
   onLeave: () => void;
 }
 
-const AI_INTERVAL_MS: Record<AiDifficulty, number> = { easy: 800, normal: 550, hard: 380 };
 const SIM_STEP_MS = 50;
 const LOCAL_COUNTDOWN_MS = 2100;
+/** Delay after an AI turn starts before the AI acts once (feels human). */
+const AI_TURN_DELAY_MS = 500;
+/** Retries of a failed AI action for one turn before giving up (the 30 s
+ *  turn timeout then passes the turn). */
+const AI_MAX_ATTEMPTS = 5;
 
 export function Game(props: GameProps): React.ReactElement {
   const { mode, engine, net, myId } = props;
@@ -59,12 +71,16 @@ export function Game(props: GameProps): React.ReactElement {
   const lastDirRef = useRef<Record<string, Dir>>({});
   const resultSentRef = useRef(false);
   const simAccRef = useRef(0);
-  const aiAccRef = useRef(0);
+  /** AI turn currently being waited on: { turn, at (rAF timestamp), attempts }. */
+  const aiPendingRef = useRef<{ turn: number; at: number; attempts: number } | null>(null);
   const countdownLeftRef = useRef(online ? 0 : LOCAL_COUNTDOWN_MS);
   const countdownShownRef = useRef(online ? props.countdown : 3);
-  const joyRef = useRef<{ dir: Dir | null; lastSent: number; active: boolean }>({ dir: null, lastSent: 0, active: false });
+  const joyRef = useRef<{ dir: Dir | null; active: boolean }>({ dir: null, active: false });
   const joyKnobRef = useRef<HTMLDivElement | null>(null);
   const lastHudRef = useRef(0);
+  /** Turn-timer bar fill + seconds, updated imperatively every rAF frame. */
+  const turnBarRef = useRef<HTMLDivElement | null>(null);
+  const turnTextRef = useRef<HTMLSpanElement | null>(null);
 
   const [orientation, setOrientation] = useState<Orientation>("h");
   const [length, setLength] = useState(2);
@@ -128,8 +144,20 @@ export function Game(props: GameProps): React.ReactElement {
     [online, engine, mirrorEngine],
   );
 
+  /** Is it this player's turn right now? Turn-based: every action is gated
+   *  on this — out-of-turn input is silently ignored (the banner shows
+   *  whose turn it is; the board dims when it is not yours). */
+  const isTurnOf = useCallback(
+    (playerId: string): boolean => {
+      const snap = currentSnapshot();
+      return !!snap && snap.status === "playing" && snap.activePlayerId === playerId;
+    },
+    [currentSnapshot],
+  );
+
   const sendMove = useCallback(
     (playerId: string, dir: Dir) => {
+      if (!isTurnOf(playerId)) return;
       lastDirRef.current[playerId] = dir;
       if (online) {
         const snap = snapRef.current;
@@ -151,17 +179,21 @@ export function Game(props: GameProps): React.ReactElement {
       if (!engine) return;
       const res = engine.tryMove(playerId, dir);
       if (res.ok) {
-        if (!res.buffered) sfx.move();
+        sfx.move();
       } else {
         rendererRef.current?.collide(playerId, performance.now());
         sfx.collide();
       }
     },
-    [online, engine, net, mirrorEngine],
+    [online, engine, net, mirrorEngine, isTurnOf],
   );
 
   const sendPlace = useCallback(
     (playerId: string, edge: Edge) => {
+      if (!isTurnOf(playerId)) {
+        showFlash("Not your turn yet");
+        return;
+      }
       if (online) {
         net?.inputPlace(edge);
         sfx.place();
@@ -177,20 +209,24 @@ export function Game(props: GameProps): React.ReactElement {
             ? "Not enough energy ⚡"
             : res.code === "NO_PATH"
               ? "That would trap a player — illegal"
-              : res.code === "ON_COOLDOWN"
-                ? "Blockade on cooldown"
+              : res.code === "NOT_YOUR_TURN"
+                ? "Not your turn yet"
                 : "Invalid placement";
         showFlash(msg);
         sfx.error();
       }
     },
-    [online, engine, net, showFlash],
+    [online, engine, net, showFlash, isTurnOf],
   );
 
   const sendPlaceAuto = useCallback(
     (playerId: string) => {
       const snap = currentSnapshot();
       const p = snap?.players.find((x) => x.id === playerId);
+      if (!isTurnOf(playerId)) {
+        showFlash("Not your turn yet");
+        return;
+      }
       const dir = lastDirRef.current[playerId] ?? (p?.color === "red" ? "down" : "up");
       const cost = blockadeCost(length);
       if (p && p.energy < cost) {
@@ -208,11 +244,17 @@ export function Game(props: GameProps): React.ReactElement {
       if (res.ok) {
         sfx.place();
       } else {
-        showFlash(res.code === "NO_ENERGY" ? "Not enough energy ⚡" : "No valid placement ahead");
+        showFlash(
+          res.code === "NO_ENERGY"
+            ? "Not enough energy ⚡"
+            : res.code === "NOT_YOUR_TURN"
+              ? "Not your turn yet"
+              : "No valid placement ahead",
+        );
         sfx.error();
       }
     },
-    [currentSnapshot, length, net, online, engine, orientation, showFlash],
+    [currentSnapshot, length, net, online, engine, orientation, showFlash, isTurnOf],
   );
 
   // -- main loop -------------------------------------------------------------
@@ -269,46 +311,63 @@ export function Game(props: GameProps): React.ReactElement {
           let guard = 0;
           while (simAccRef.current >= SIM_STEP_MS && guard++ < 6) {
             simAccRef.current -= SIM_STEP_MS;
-            eng.tickMs(SIM_STEP_MS);
+            // Wall-clock now: turn deadlines are epoch ms, and turn
+            // timeouts auto-pass after 30 s of inactivity.
+            eng.tickMs(SIM_STEP_MS, Date.now());
           }
-          // AI driver (practice).
+          // AI driver (practice): exactly ONE action per AI turn, ~500 ms
+          // after the turn starts. The core AI refuses to act off-turn,
+          // and a successful action passes the turn back to the human.
           if (p.mode === "practice" && p.aiDifficulty) {
-            aiAccRef.current += dt;
-            const interval = AI_INTERVAL_MS[p.aiDifficulty];
-            if (aiAccRef.current >= interval) {
-              aiAccRef.current = 0;
-              const aiId = eng.snapshot().players.find((x) => x.id !== p.myId)?.id;
-              if (aiId && eng.snapshot().status === "playing") {
+            const s = eng.snapshot();
+            const aiId = s.players.find((x) => x.id !== p.myId)?.id;
+            if (aiId && s.status === "playing" && s.activePlayerId === aiId) {
+              const pend = aiPendingRef.current;
+              if (!pend || pend.turn !== s.turnNumber) {
+                aiPendingRef.current = { turn: s.turnNumber, at: now, attempts: 0 };
+              } else if (now - pend.at >= AI_TURN_DELAY_MS) {
                 const action = chooseAiAction(eng, aiId, p.aiDifficulty);
+                let ok = false;
                 if (action) {
-                  if (action.kind === "move") eng.tryMove(aiId, action.dir);
-                  else eng.place(aiId, action.edge);
+                  ok =
+                    action.kind === "move"
+                      ? eng.tryMove(aiId, action.dir).ok
+                      : eng.place(aiId, action.edge).ok;
+                }
+                if (ok || pend.attempts >= AI_MAX_ATTEMPTS) {
+                  // Acted (or gave up — the 30 s turn timeout passes the turn).
+                  aiPendingRef.current = null;
+                } else {
+                  pend.attempts += 1;
+                  pend.at = now; // retry after another short delay
                 }
               }
+            } else {
+              aiPendingRef.current = null;
             }
           }
-          // Joystick hold-to-move repeat.
-          const joy = joyRef.current;
-          if (joy.active && joy.dir && now - joy.lastSent >= 170) {
-            joy.lastSent = now;
-            sendMove(p.myId, joy.dir);
-          }
-        }
-      } else {
-        // Online joystick repeat.
-        const joy = joyRef.current;
-        if (joy.active && joy.dir && now - joy.lastSent >= 170) {
-          joy.lastSent = now;
-          sendMove(p.myId, joy.dir);
         }
       }
+      // Online: no per-frame simulation here — the server is authoritative.
+      // (No joystick hold-to-repeat anywhere: one discrete action per turn.)
 
       const snap = currentSnapshot();
+
+      // Turn timer: countdown bar + seconds, updated every animation frame
+      // from the authoritative turn deadline (same rAF loop, no second timer).
+      if (snap && snap.status === "playing" && snap.turnDeadlineMs > 0) {
+        const remaining = Math.max(0, snap.turnDeadlineMs - Date.now());
+        const bar = turnBarRef.current;
+        if (bar) bar.style.width = `${Math.min(100, (remaining / TURN_DURATION_MS) * 100).toFixed(1)}%`;
+        const secs = turnTextRef.current;
+        if (secs) secs.textContent = `${Math.ceil(remaining / 1000)}s`;
+      }
+
       if (snap) {
         if (snap.gridSize !== renderer.gridSize) resize();
         renderer.setSnapshot(snap, now);
-        // Refresh the HUD (energy / timer / progress) at 4 Hz — cheap, and
-        // it keeps React out of the 60 fps render path.
+        // Refresh the HUD (energy / timer / progress / turn label) at 4 Hz —
+        // cheap, and it keeps React out of the 60 fps render path.
         if (now - lastHudRef.current >= 250) {
           lastHudRef.current = now;
           setSnapState(snap);
@@ -348,7 +407,8 @@ export function Game(props: GameProps): React.ReactElement {
   // -- keyboard ---------------------------------------------------------------
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.repeat && !isP1MoveKey(e.key) && !isP2MoveKey(e.key)) return;
+      // One discrete action per keypress — holding a key never queues moves.
+      if (e.repeat) return;
       const dir = keyToDir(e.key);
       if (dir) {
         e.preventDefault();
@@ -361,8 +421,11 @@ export function Game(props: GameProps): React.ReactElement {
       }
       if (e.key === "b" || e.key === "B" || e.key === " ") {
         e.preventDefault();
-        if (mode === "local2p") sendPlaceAuto("p1");
-        else sendPlaceAuto(myId);
+        if (mode === "local2p") {
+          // Local 2P: the blockade button acts for whoever's turn it is.
+          const snap = currentSnapshot();
+          sendPlaceAuto(snap?.activePlayerId ?? "p1");
+        } else sendPlaceAuto(myId);
       } else if (e.key === "h" || e.key === "H") {
         setOrientation((o) => (o === "h" ? "v" : "h"));
       } else if (["1", "2", "3", "4"].includes(e.key)) {
@@ -371,22 +434,26 @@ export function Game(props: GameProps): React.ReactElement {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [mode, myId, sendMove, sendPlaceAuto]);
+  }, [mode, myId, sendMove, sendPlaceAuto, currentSnapshot]);
 
   // -- pointer: drag blockade / swipe move --------------------------------------
-  const nearestPlayerId = (fx: number, fy: number): string => {
+  const onPointerDown = (e: React.PointerEvent) => {
     const snap = currentSnapshot();
-    if (!snap) return myId;
-    let best = snap.players[0];
-    let bestD = Infinity;
-    for (const p of snap.players) {
-      const d = Math.abs(p.row + 0.5 - fy) + Math.abs(p.col + 0.5 - fx);
-      if (d < bestD) {
-        bestD = d;
-        best = p;
-      }
+    if (!snap || snap.status !== "playing") return;
+    // Only the active player can act this turn. Local 2P: the player whose
+    // turn it is, on the same device. Online/practice: me, on my turn only.
+    const playerId = mode === "local2p" ? snap.activePlayerId : myId;
+    if (snap.activePlayerId !== playerId) return;
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    const { fx, fy } = pointerPos(e);
+    const n = snap.gridSize;
+    const edge = pickEdge(fx, fy, n);
+    if (edge) {
+      dragRef.current = { start: edge, current: edge, playerId };
+      previewRef.current = { edge, valid: validatePreview(playerId, edge) === null };
+    } else {
+      swipeRef.current = { x: e.clientX, y: e.clientY, playerId };
     }
-    return best.id;
   };
 
   const pointerPos = (e: React.PointerEvent): { fx: number; fy: number } => {
@@ -395,21 +462,6 @@ export function Game(props: GameProps): React.ReactElement {
     return rendererRef.current
       ? rendererRef.current.pointToCell(e.clientX - rect.left, e.clientY - rect.top)
       : { fx: 0, fy: 0 };
-  };
-
-  const onPointerDown = (e: React.PointerEvent) => {
-    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
-    const { fx, fy } = pointerPos(e);
-    const snap = currentSnapshot();
-    const n = snap?.gridSize ?? 12;
-    const edge = pickEdge(fx, fy, n);
-    const playerId = mode === "local2p" ? nearestPlayerId(fx, fy) : myId;
-    if (edge) {
-      dragRef.current = { start: edge, current: edge, playerId };
-      previewRef.current = { edge, valid: validatePreview(playerId, edge) === null };
-    } else {
-      swipeRef.current = { x: e.clientX, y: e.clientY, playerId };
-    }
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
@@ -443,14 +495,13 @@ export function Game(props: GameProps): React.ReactElement {
     if (dir) sendMove(swipe.playerId, dir);
   };
 
-  // -- joystick -------------------------------------------------------------------
+  // -- joystick (one discrete move per direction change, no hold-to-repeat) -----
   const joyCenter = useRef<{ x: number; y: number } | null>(null);
   const onJoyDown = (e: React.PointerEvent) => {
     (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     joyCenter.current = { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
     joyRef.current.active = true;
-    joyRef.current.lastSent = 0;
     onJoyMove(e);
   };
   const onJoyMove = (e: React.PointerEvent) => {
@@ -466,7 +517,6 @@ export function Game(props: GameProps): React.ReactElement {
     const dir = joystickDir(clamped, clampedY);
     if (dir && dir !== joyRef.current.dir) {
       joyRef.current.dir = dir;
-      joyRef.current.lastSent = performance.now();
       sendMove(myId, dir);
     } else if (!dir) {
       joyRef.current.dir = null;
@@ -479,6 +529,32 @@ export function Game(props: GameProps): React.ReactElement {
   };
 
   const snap = snapState ?? currentSnapshot();
+
+  // Turn banner (single place — the HUD): whose turn, which turn number.
+  let turnLabel: string | null = null;
+  let turnColor: "blue" | "red" | null = null;
+  let turnMine = false;
+  if (snap && snap.status === "playing" && snap.players.length >= 2) {
+    const active = snap.players.find((p) => p.id === snap.activePlayerId) ?? null;
+    if (active) {
+      turnColor = active.color;
+      turnMine = mode !== "local2p" && active.id === myId;
+      if (mode === "local2p") {
+        turnLabel = `Giliran ${active.color === "blue" ? "P1" : "P2"} · Turn ${snap.turnNumber}`;
+      } else if (active.id === myId) {
+        turnLabel = `Giliran kamu · Turn ${snap.turnNumber}`;
+      } else {
+        turnLabel = `Giliran lawan · Turn ${snap.turnNumber}`;
+      }
+    }
+  }
+  // Board input is gated (and the board visibly dimmed) whenever it is not
+  // the local player's turn — online and practice. Local 2P never dims:
+  // the active player is always at the device.
+  const inputGated =
+    !!snap && snap.status === "playing" && mode !== "local2p" && snap.activePlayerId !== myId;
+  const canAct = !!snap && snap.status === "playing" && snap.activePlayerId === myId;
+
   const toggleMute = () => {
     const m = !muted;
     setMuted(m);
@@ -503,9 +579,15 @@ export function Game(props: GameProps): React.ReactElement {
           muted={muted}
           onToggleMute={toggleMute}
           flash={flash}
+          turnLabel={turnLabel}
+          turnColor={turnColor}
+          turnMine={turnMine}
+          turnBarRef={turnBarRef}
+          turnTextRef={turnTextRef}
+          canAct={canAct}
         />
       )}
-      <div className="board-wrap" ref={wrapRef}>
+      <div className={`board-wrap${inputGated ? " board-dimmed" : ""}`} ref={wrapRef}>
         <canvas
           ref={canvasRef}
           className="board-canvas"
@@ -550,6 +632,9 @@ export function Game(props: GameProps): React.ReactElement {
         </span>
         <span>
           <b>1–4</b> length
+        </span>
+        <span>
+          <b>1 action</b> per turn · 30 s
         </span>
       </div>
     </div>

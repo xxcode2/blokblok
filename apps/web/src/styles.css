@@ -395,6 +395,11 @@ select:focus {
   align-items: center;
 }
 
+/* Turn-based: the player whose turn it is is marked in the HUD. */
+.hud-player.active-turn .hud-name {
+  color: var(--cyan);
+}
+
 .hud-orb-dot {
   width: 12px;
   height: 12px;
@@ -545,7 +550,60 @@ select:focus {
   background: rgba(244, 63, 94, 0.18);
 }
 
-.hud-cooldown {
+.hud-turn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.hud-turn.mine {
+  border-color: var(--cyan);
+  box-shadow: 0 0 12px rgba(34, 211, 238, 0.25);
+}
+
+.hud-turn.theirs {
+  opacity: 0.85;
+}
+
+.hud-turn-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--muted);
+  flex: none;
+}
+
+.hud-turn-dot.blue {
+  background: var(--blue);
+  box-shadow: 0 0 8px var(--blue);
+}
+
+.hud-turn-dot.red {
+  background: var(--red);
+  box-shadow: 0 0 8px var(--red);
+}
+
+.hud-turn-label {
+  flex: none;
+  white-space: nowrap;
+}
+
+.hud-turn-secs {
+  color: var(--amber);
+  font-variant-numeric: tabular-nums;
+  flex: none;
+  min-width: 28px;
+  text-align: right;
+}
+
+.hud-turn-bar {
   flex: 1;
   min-width: 60px;
   height: 6px;
@@ -554,10 +612,9 @@ select:focus {
   overflow: hidden;
 }
 
-.hud-cooldown-fill {
+.hud-turn-fill {
   height: 100%;
   background: var(--cyan);
-  transition: width 0.1s linear;
 }
 
 .hud-vs {
@@ -584,6 +641,14 @@ select:focus {
   cursor: crosshair;
   max-width: 100%;
   max-height: 100%;
+}
+
+/* Turn-based: the board is visibly dimmed (and pointer-dead) while it is
+ * not the local player's turn — online and practice. */
+.board-dimmed .board-canvas {
+  opacity: 0.55;
+  filter: saturate(0.55);
+  pointer-events: none;
 }
 
 .countdown-overlay {

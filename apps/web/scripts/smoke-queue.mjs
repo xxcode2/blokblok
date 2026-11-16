@@ -1,29 +1,34 @@
-// Matchmaking smoke test: two clients queue -> matchFound -> countdown ->
-// matchStart. Run: node apps/web/scripts/smoke-queue.mjs
-const URL = process.argv[2] ?? "ws://localhost:3001";
+// Matchmaking smoke test — turn-based protocol 1.1.0: two clients queue ->
+// matchFound -> countdown -> matchStart (turn 1 = P1/blue, turnNumber 1,
+// 30 s deadline), then P1 moves once and the `turn` delta passes the turn
+// to P2. Run: node apps/web/scripts/smoke-queue.mjs
+import { PROTOCOL_VERSION } from "../../../packages/core/dist/index.js";
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
+const URL = process.argv[2] ?? "ws://localhost:3001";
 
 class Client {
   constructor(name) {
     this.name = name;
     this.queue = [];
-    this.waiters = [];
+    this.waiters = []; // { pred, resolve, timer } — persist until they match
   }
   connect() {
     return new Promise((resolve, reject) => {
       this.ws = new WebSocket(URL);
       this.ws.addEventListener("open", () => {
-        this.send({ type: "hello", name: this.name, clientVersion: "1.0.0" });
+        this.send({ type: "hello", name: this.name, clientVersion: PROTOCOL_VERSION });
         resolve();
       });
       this.ws.addEventListener("message", (ev) => {
         const msg = JSON.parse(ev.data);
         if (msg.type === "welcome") this.playerId = msg.playerId;
         this.queue.push(msg);
-        for (const w of this.waiters.splice(0)) w(msg);
+        for (const w of [...this.waiters]) {
+          if (w.pred(msg)) {
+            this.waiters = this.waiters.filter((x) => x !== w);
+            w.resolve(msg);
+          }
+        }
       });
       this.ws.addEventListener("error", () => reject(new Error(`${this.name}: connect failed`)));
     });
@@ -31,17 +36,42 @@ class Client {
   send(msg) {
     this.ws.send(JSON.stringify(msg));
   }
-  waitFor(type, timeoutMs = 10000) {
-    const found = this.queue.find((m) => m.type === type);
+  waitForMsg(pred, timeoutMs, label) {
+    const found = this.queue.find(pred);
     if (found) return Promise.resolve(found);
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`${this.name}: timed out waiting for ${type}`)), timeoutMs);
-      this.waiters.push((msg) => {
-        if (msg.type === type) {
-          clearTimeout(timer);
-          resolve(msg);
-        }
-      });
+      const entry = { pred, resolve: null, timer: null };
+      entry.timer = setTimeout(() => {
+        this.waiters = this.waiters.filter((w) => w !== entry);
+        reject(new Error(`${this.name}: timed out waiting for ${label}`));
+      }, timeoutMs);
+      entry.resolve = (msg) => {
+        clearTimeout(entry.timer);
+        resolve(msg);
+      };
+      this.waiters.push(entry);
+    });
+  }
+  waitFor(type, timeoutMs = 10000) {
+    return this.waitForMsg((m) => m.type === type, timeoutMs, type);
+  }
+  /** Wait for the turn to pass to `playerId` (turn delta or state snapshot).
+   *  No backlog scan: turn events repeat every turn. */
+  waitForTurn(playerId, timeoutMs = 8000) {
+    const pred = (m) =>
+      (m.type === "delta" && m.events.some((e) => e.k === "turn" && e.activePlayerId === playerId)) ||
+      (m.type === "state" && m.snapshot.activePlayerId === playerId);
+    return new Promise((resolve, reject) => {
+      const entry = { pred, resolve: null, timer: null };
+      entry.timer = setTimeout(() => {
+        this.waiters = this.waiters.filter((w) => w !== entry);
+        reject(new Error(`${this.name}: timed out waiting for turn -> ${playerId}`));
+      }, timeoutMs);
+      entry.resolve = (msg) => {
+        clearTimeout(entry.timer);
+        resolve(msg);
+      };
+      this.waiters.push(entry);
     });
   }
   close() {
@@ -69,6 +99,25 @@ try {
   console.log(`  [ok] countdown seconds=${cd.seconds}`);
   const ms = await a.waitFor("matchStart", 10000);
   console.log(`  [ok] matchStart status=${ms.snapshot.status} players=${ms.snapshot.players.length}`);
+  if (ms.snapshot.status !== "playing") throw new Error(`bad status: ${ms.snapshot.status}`);
+  if (ms.snapshot.turnNumber !== 1) throw new Error(`expected turnNumber 1, got ${ms.snapshot.turnNumber}`);
+  if (!(ms.snapshot.turnDeadlineMs > Date.now())) {
+    throw new Error(`expected turnDeadlineMs in the future, got ${ms.snapshot.turnDeadlineMs}`);
+  }
+  const p1 = ms.snapshot.players.find((p) => p.color === "blue");
+  const p2 = ms.snapshot.players.find((p) => p.color === "red");
+  if (!p1 || !p2) throw new Error("matchStart missing blue/red players");
+  if (ms.snapshot.activePlayerId !== p1.id) {
+    throw new Error(`expected turn 1 active=${p1.id} (P1/blue), got ${ms.snapshot.activePlayerId}`);
+  }
+  console.log(`  [ok] turn 1 = P1 (blue), turnNumber=1, deadline in ~${Math.round((ms.snapshot.turnDeadlineMs - Date.now()) / 1000)}s`);
+  // P1 moves once (up, from the bottom row); the turn delta must pass the
+  // turn to P2.
+  const p1Client = a.playerId === p1.id ? a : b;
+  const p2Client = p1Client === a ? b : a;
+  p1Client.send({ type: "input", seq: 1, kind: "move", dir: "up" });
+  await p2Client.waitForTurn(p2.id);
+  console.log(`  [ok] P1 move -> turn delta passed the turn to P2`);
   a.close();
   b.close();
   console.log("\nSMOKE QUEUE: PASS");

@@ -249,6 +249,12 @@ export function applyDeltaToSnapshot(snap: Snapshot, events: DeltaEvent[]): Snap
     } else if (e.k === "score") {
       const p = next.players.find((x) => x.id === e.playerId);
       if (p) p.score = e.score;
+    } else if (e.k === "turn") {
+      // Turn-based (protocol 1.1.0): the turn passed — update who may act,
+      // the turn number, and the deadline the turn-timer bar counts down from.
+      next.activePlayerId = e.activePlayerId;
+      next.turnNumber = e.turnNumber;
+      next.turnDeadlineMs = e.turnDeadlineMs;
     } else if (e.k === "collide") {
       // No state change — the renderer turns this into sparks + a thud.
     } else if (e.k === "win") {

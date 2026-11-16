@@ -1,9 +1,13 @@
-// In-game HUD: timer, energy, progress, connection, blockade controls.
-// Spec §14: player score, opponent score, energy, timer, blockade cooldown,
-// current objective, network indicator.
+// In-game HUD: turn banner + turn timer, energy, progress, connection,
+// blockade controls. Turn-based (protocol 1.1.0): one action per turn, 30 s
+// per turn — no cooldowns. The turn banner + timer bar live here and nowhere
+// else; the bar fill / seconds are updated every animation frame by the Game
+// screen's rAF loop through turnBarRef / turnTextRef (no second timer, and
+// React never overwrites them because no width/text is set in props).
 
 import type { Orientation, Snapshot } from "@blockade/core";
 import { blockadeCost } from "@blockade/core";
+import type { RefObject } from "react";
 
 export interface HudProps {
   snap: Snapshot;
@@ -20,6 +24,18 @@ export interface HudProps {
   muted: boolean;
   onToggleMute: () => void;
   flash: string | null;
+  /** "Giliran kamu · Turn 3" / "Giliran lawan · Turn 3" / "Giliran P1 · Turn 3"; null when no turn is live. */
+  turnLabel: string | null;
+  /** Colour of the player whose turn it is (drives the banner dot). */
+  turnColor: "blue" | "red" | null;
+  /** True when the banner marks the local player's own turn (online/practice). */
+  turnMine: boolean;
+  /** Bar fill driven imperatively every frame by the Game rAF loop. */
+  turnBarRef: RefObject<HTMLDivElement | null>;
+  /** Seconds text driven imperatively every frame by the Game rAF loop. */
+  turnTextRef: RefObject<HTMLSpanElement | null>;
+  /** True when the acting (local) player may act this turn. */
+  canAct: boolean;
 }
 
 function fmtTime(ms: number): string {
@@ -32,29 +48,40 @@ export function Hud(props: HudProps): React.ReactElement {
   const me = props.myId ? snap.players.find((p) => p.id === props.myId) : snap.players[0];
   const foe = props.myId ? snap.players.find((p) => p.id !== props.myId) : snap.players[1];
   const cost = blockadeCost(props.length);
-  const placeReady = me ? me.placeCooldownMs <= 0 && me.energy >= cost : false;
-  const cdPct = me ? Math.max(0, 1 - me.placeCooldownMs / 500) : 1;
+  const placeReady = props.canAct && me ? me.energy >= cost : false;
 
   return (
     <div className="hud">
+      {props.turnLabel && (
+        <div className={`hud-turn ${props.turnMine ? "mine" : "theirs"}`}>
+          <span className={`hud-turn-dot ${props.turnColor ?? ""}`} />
+          <span className="hud-turn-label">{props.turnLabel}</span>
+          <span className="hud-turn-secs" ref={props.turnTextRef} />
+          <div className="hud-turn-bar" title="Time left in this turn (30 s per turn)">
+            <div className="hud-turn-fill" ref={props.turnBarRef} />
+          </div>
+        </div>
+      )}
       <div className="hud-row">
         <div className="hud-players">
           {snap.players.map((p) => {
             const isMe = p.id === props.myId;
+            const isActive = p.id === snap.activePlayerId && snap.status === "playing";
             const goalRow = p.color === "blue" ? "row 0" : `row ${snap.gridSize - 1}`;
             return (
-              <div key={p.id} className={`hud-player ${p.color}${isMe ? " me" : ""}`}>
+              <div key={p.id} className={`hud-player ${p.color}${isMe ? " me" : ""}${isActive ? " active-turn" : ""}`}>
                 <span className="hud-orb-dot" />
                 <span className="hud-name">
                   {p.name}
                   {isMe ? " (you)" : ""}
+                  {isActive ? " ●" : ""}
                 </span>
                 <span className="hud-score">{p.score} pts</span>
                 <div className="hud-progress" title={`Progress to ${goalRow}`}>
                   <div className="hud-progress-fill" style={{ width: `${Math.round(p.progress * 100)}%` }} />
                 </div>
                 <span className="hud-energy-label">⚡ {Math.floor(p.energy)}/100</span>
-                <div className="hud-energy" title="Blockade energy (regenerates 5/s)">
+                <div className="hud-energy" title="Blockade energy (+10 at the start of each of your turns)">
                   <div className="hud-energy-fill" style={{ width: `${Math.round(p.energy)}%` }} />
                 </div>
               </div>
@@ -107,32 +134,32 @@ export function Hud(props: HudProps): React.ReactElement {
             className="hud-place"
             disabled={!placeReady}
             onClick={() => me && props.onPlaceAuto(me.id)}
-            title={placeReady ? "Place a blockade ahead of you (B)" : "On cooldown or not enough energy"}
+            title={placeReady ? "Place a blockade ahead of you (B)" : props.canAct ? "Not enough energy" : "Wait for your turn"}
           >
-            🧱 Place blockade {me && me.placeCooldownMs > 0 ? `(${(me.placeCooldownMs / 1000).toFixed(1)}s)` : ""}
+            🧱 Place blockade
           </button>
         ) : (
           <>
-            {snap.players.map((p) => (
-              <button
-                key={p.id}
-                className={`hud-place ${p.color}`}
-                disabled={p.placeCooldownMs > 0 || p.energy < cost}
-                onClick={() => props.onPlaceAuto(p.id)}
-                title={`Place a blockade ahead of ${p.name}`}
-              >
-                🧱 {p.name}
-              </button>
-            ))}
+            {snap.players.map((p) => {
+              const pActive = p.id === snap.activePlayerId && snap.status === "playing";
+              return (
+                <button
+                  key={p.id}
+                  className={`hud-place ${p.color}`}
+                  disabled={!pActive || p.energy < cost}
+                  onClick={() => props.onPlaceAuto(p.id)}
+                  title={pActive ? `Place a blockade ahead of ${p.name}` : `Wait for ${p.name}'s turn`}
+                >
+                  🧱 {p.name}
+                </button>
+              );
+            })}
           </>
         )}
-        <div className="hud-cooldown" title="Blockade placement cooldown">
-          <div className="hud-cooldown-fill" style={{ width: `${Math.round(cdPct * 100)}%` }} />
-        </div>
       </div>
       {foe && me && (
         <div className="hud-vs">
-          {me.name} vs {foe.name} · {snap.gridSize}×{snap.gridSize} · Race to the Top
+          {me.name} vs {foe.name} · {snap.gridSize}×{snap.gridSize} · Race to the Top · one action per turn
         </div>
       )}
     </div>
