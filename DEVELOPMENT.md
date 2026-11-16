@@ -33,9 +33,9 @@ All ids are strings. All times in ms unless noted.
 | type | fields | meaning |
 |---|---|---|
 | `hello` | `name: string`, `clientVersion: string` | First message after connect. Server replies `welcome`. |
-| `createRoom` | `mode: "race"`, `gridSize: 12\|20\|30\|40`, `durationSec: number` | Create a private room. → `roomCreated` |
+| `createRoom` | `mode: "race"\|"trophy"`, `gridSize: 12\|20\|30\|40`, `durationSec: number`, `playerCount?: 2\|4` | Create a private room. → `roomCreated`. Race is always 2P; trophy is 2P (default) or 4P. |
 | `joinRoom` | `roomCode: string` | Join a private room. → `roomJoined` or `error` |
-| `queue` | `mode: "race"`, `gridSize: number` | Enter public 1v1 matchmaking. → `queued`, then `matchFound` |
+| `queue` | `mode: "race"\|"trophy"`, `gridSize: number`, `playerCount?: 2\|4` | Enter public matchmaking. → `queued`, then `matchFound`. A 4P trophy queue entry only matches three other 4P trophy entries with the same gridSize. |
 | `leaveQueue` | — | Leave the queue. → `queueLeft` |
 | `ready` | `ready: boolean` | Toggle ready in the lobby. → `lobbyUpdate` |
 | `start` | — | Host starts when all players are ready. → `countdown` |
@@ -51,16 +51,16 @@ All ids are strings. All times in ms unless noted.
 |---|---|---|
 | `welcome` | `playerId: string`, `serverVersion: string` | Assigned id for this connection. |
 | `roomCreated` | `roomId, roomCode (6 chars), token` | Private room ready; share the code. |
-| `roomJoined` | `roomId, roomCode, mode, gridSize, durationSec, players: [{id,name,ready,isHost}]` | You are in the room. |
-| `lobbyUpdate` | `players: [{id,name,ready,isHost}]` | Someone's ready state changed. |
+| `roomJoined` | `roomId, roomCode, mode, playerCount, gridSize, durationSec, players: [{id,name,ready,isHost}]` | You are in the room. |
+| `lobbyUpdate` | `mode, playerCount, players: [{id,name,ready,isHost}]` | Someone's ready state changed (or joined/left). |
 | `queued` | `position: number` | You are in the matchmaking queue. |
 | `queueLeft` | — | You left the queue. |
-| `matchFound` | `roomId, roomCode, token, opponent: {id,name}` | Match made; join the room flow. |
+| `matchFound` | `roomId, roomCode, token, mode, playerCount, opponent: {id,name}, opponents: [{id,name}]` | Match made; join the room flow. `opponent` is the first opponent (2P compat); `opponents` lists all other players (1 in 2P, 3 in 4P). |
 | `countdown` | `seconds: 3` | Match starts in N seconds. |
-| `matchStart` | `snapshot: Snapshot` | Initial full state. |
+| `matchStart` | `snapshot: Snapshot` | Initial full state. Snapshot carries `mode`, `playerCount` and `trophy`. |
 | `state` | `tick: number`, `snapshot: Snapshot` | Full snapshot (on join/reconnect and every ~1s). |
 | `delta` | `tick: number`, `events: DeltaEvent[]` | Incremental updates between snapshots. |
-| `result` | `winnerId: string \| null, reason: "goal"\|"timeout"\|"forfeit"\|"draw"`, `scores, stats, durationMs` | Match over. |
+| `result` | `winnerId: string \| null, reason: "goal"\|"trophy"\|"timeout"\|"forfeit"\|"draw"`, `scores, stats, durationMs` | Match over. |
 | `opponentLeft` | `playerId: string` | Opponent disconnected (match continues vs AI? No — forfeit after 30s grace, see rules). |
 | `error` | `code: string`, `message: string` | Rejected request. Codes: `BAD_REQUEST`, `ROOM_NOT_FOUND`, `ROOM_FULL`, `NOT_READY`, `NOT_HOST`, `INVALID_MOVE`, `INVALID_BLOCKADE`, `NO_PATH`, `NO_ENERGY`, `NOT_YOUR_TURN`, `NOT_IN_MATCH`, `BAD_TOKEN`. |
 
@@ -69,14 +69,16 @@ All ids are strings. All times in ms unless noted.
 interface Snapshot {
   tick: number;
   status: "lobby" | "countdown" | "playing" | "finished";
-  mode: "race";
+  mode: "race" | "trophy";
+  playerCount: number; // 2, or 4 in a 4P trophy match
+  trophy: { row: number; col: number } | null; // centre cell in trophy mode, null in race
   gridSize: number;
   durationSec: number;
   timeLeftMs: number;
   activePlayerId: string; // whose turn it is (turn 1 = P1, blue)
   turnNumber: number;     // starts at 1, +1 on every turn pass
   turnDeadlineMs: number; // epoch ms when the current turn expires (0 = not started)
-  players: PlayerState[];   // { id, name, color: "blue"|"red", row, col,
+  players: PlayerState[];   // { id, name, color: "blue"|"red"|"green"|"amber", row, col,
                              //   energy, score, progress }
   blockades: BlockadeState[]; // { id, playerId, edges: Edge[], createdTick }
   winnerId: string | null;
@@ -93,10 +95,10 @@ type DeltaEvent =
   | { k: "score"; playerId: string; score: number }
   | { k: "turn"; activePlayerId: string; turnNumber: number; turnDeadlineMs: number }
   | { k: "collide"; playerId: string; row: number; col: number; tick: number }
-  | { k: "win"; winnerId: string | null; reason: "goal" | "timeout" | "forfeit" | "draw"; tick: number };
+  | { k: "win"; winnerId: string | null; reason: "goal" | "trophy" | "timeout" | "forfeit" | "draw"; tick: number };
 ```
 The `turn` event is emitted on every turn pass — after a valid action and
-on a timeout auto-pass. Protocol version is **1.1.0** (turn-based);
+on a timeout auto-pass. Protocol version is **1.2.0** (turn-based + trophy/4P);
 `GET /health` reports it as both `version` and `protocol`, and `welcome`
 reports it as `serverVersion`.
 
@@ -116,9 +118,15 @@ Cells are `(row, col)`, `0 <= row, col < N`. A blockade sits on **edges between 
 ## Game rules (summary — full rules in GAME_RULES.md)
 - Race to the Top, 1v1. P1 blue starts bottom row centre, goal = row 0. P2 red starts
   top row centre, goal = row `N-1`. First to any goal-row cell wins.
-- **Turn-based (protocol 1.1.0):** one action per turn — move 1 cell
+- **Trophy mode (protocol 1.2.0):** 2 or 4 players; the trophy sits on the
+  centre cell `(floor(N/2), floor(N/2))` — (6,6) on 12×12, (10,10) on 20×20.
+  First orb to step onto it wins (reason `trophy`). 2P trophy keeps the Race
+  spawns. 4P spawns: P1 bottom centre, P2 top centre, P3 left centre (green
+  `#22c55e`), P4 right centre (amber `#f59e0b`). Race stays 2-player.
+- **Turn-based (protocol 1.2.0):** one action per turn — move 1 cell
   (up/down/left/right) OR place 1 blockade. Turn 1 belongs to P1. After a
-  valid action the turn passes to the other player, `turnNumber += 1`, and
+  valid action the turn passes to the next player in seat order
+  (P1→P2 in 2P, P1→P2→P3→P4→P1… in 4P), `turnNumber += 1`, and
   the new deadline is now + 30 s (`TURN_DURATION_MS = 30000`). An invalid
   action is rejected (`INVALID_MOVE` / `INVALID_BLOCKADE` / `NO_PATH` /
   `NO_ENERGY`, or `NOT_YOUR_TURN` out of turn) and the turn does NOT pass.
@@ -129,11 +137,12 @@ Cells are `(row, col)`, `0 <= row, col < N`. A blockade sits on **edges between 
 - Blockade: energy cost 20 (len 1–2) or 35 (len 3+), max energy 100,
   **+10 energy at the start of each of your turns** (`ENERGY_PER_TURN = 10`,
   capped at 100; no per-second regen), max 10 active per player, max length 4.
-- **BFS fairness rule:** a placement is rejected if, after placing it, EITHER player
-  has no BFS path to their goal row. This is enforced in the core engine AND on the
-  server. Never allow a softlock.
-- Timer default 180 s. On timeout, the player closer to their goal (fewest rows away)
-  wins; equal distance = draw.
+- **BFS fairness rule:** a placement is rejected if, after placing it, ANY player
+  has no BFS path to their target (goal row in Race, trophy cell in Trophy).
+  This is enforced in the core engine AND on the server. Never allow a softlock.
+- Timer default 180 s. On timeout, the player closest to their target wins
+  (fewest rows in Race, shortest path to the trophy in Trophy); equal
+  distance = draw.
 - Server tick 20/s. Server is authoritative: it validates every input, enforces
   the turn (`NOT_YOUR_TURN` on every `input` before applying), simulates,
   and broadcasts. The 20/s tick loop drives the engine tick, so 30 s turn
@@ -157,6 +166,13 @@ npm run dev --workspace=@blockade/web       # web on http://localhost:5173
   turn timer with auto-pass, +10 energy at the start of your turn, no
   cooldowns, no input buffering. `chooseAiAction` picks a single
   move-or-blockade action per AI turn.
+  - **Trophy mode + 4 players since protocol 1.2.0 (2026-11-17):** trophy on
+    the centre cell, first orb onto it wins (reason `trophy`); 4P trophy
+    rooms (P3 green `#22c55e`, P4 amber `#f59e0b`, spawns on all four sides);
+    turns rotate P1→P2→P3→P4→P1…; BFS fairness checks every player's path
+    to their target; AI targets the trophy cell in trophy mode and blocks the
+    most threatening opponent in 4P. Core tests: 56/56 pass (42 race/turn
+    tests + 14 trophy/4P tests in `packages/core/src/test/trophy.test.ts`).
   - Animation support in the engine: `PlayerState.anim` carries the in-flight
     move (from→to, startTick, durationMs) and `BlockadeState.placedTick/
     deployDurationMs` carry the grow-in window; `interpolatedPosition()` /
@@ -168,6 +184,12 @@ npm run dev --workspace=@blockade/web       # web on http://localhost:5173
     wall-clock entry point owns the name `tick`).
 - Server: authoritative 20-tick sim, rooms by 6-char code, 1v1 matchmaking queue,
   reconnect tokens, snapshots + deltas, match results (in-memory).
+  - Rooms carry `mode` + `playerCount` (capacity 2, or 4 for trophy); the
+    matchmaking queue groups by mode + gridSize + playerCount, so a 4P trophy
+    room fills with exactly 4 players; `matchFound` carries `mode`,
+    `playerCount`, `opponent` (first opponent) and `opponents` (all other
+    players); `matchStart` snapshots carry `mode`, `playerCount` and the
+    trophy position; reconnect snapshots carry the same fields.
   - Verified 2026-11-16 (Track 1, live server on :3001, protocol 1.1.0):
     `apps/server/scripts/smoke-test.mjs` PASSED — turn-based scripted 1v1:
     hello, ping/pong, createRoom (6-char code), joinRoom, ready, start,
@@ -185,6 +207,17 @@ npm run dev --workspace=@blockade/web       # web on http://localhost:5173
     `BAD_TOKEN`). One bug found + fixed during verification: `reconnect` was
     rejected by the hello-gate because it arrives as the first message on a
     fresh socket — it now authenticates via token before the gate.
+  - Verified 2026-11-17 (protocol 1.2.0, re-run of the 1v1 smoke test):
+    `smoke-test.mjs` PASSED again (winner score 452, 64 broadcasts, max gap
+    52 ms, tick max 2.91 ms). `apps/server/scripts/smoke-test-4p-trophy.mjs`
+    PASSED — scripted 4P trophy match: createRoom (trophy, playerCount 4),
+    3 joins, 5th join rejected `ROOM_FULL`, all ready, countdown,
+    matchStart (mode trophy, playerCount 4, trophy (6,6), spawns
+    (11,6)/(0,6)/(6,0)/(6,11), colours blue/red/green/amber), P2 out-of-turn
+    move → `NOT_YOUR_TURN`, turn rotation back to P1 verified at turns 5, 9,
+    13 and 17, P1 walks up column 6 onto the trophy → `result` winner P1,
+    reason `trophy`, score 456. `queue-test.mjs` and `reconnect-test.mjs`
+    still pass unchanged.
   - Rate limiting: max 30 inputs/sec per player (drop + `BAD_REQUEST`).
     Matchmade rooms auto-ready both players and auto-start 500 ms after
     `matchFound`. Results + tick stats on GET /stats; GET /health for liveness.
@@ -229,7 +262,7 @@ npm run dev --workspace=@blockade/web       # web on http://localhost:5173
 
 ## What is NOT built (later phases)
 - 2v2 / FFA / Territory / Survival / Speed Rush / Team / Puzzle modes (spec §9:
-  only Race is implemented).
+  only Race and Trophy are implemented).
 - Accounts, profiles, XP, achievements, cosmetics, leaderboards, seasons (§15).
 - PostgreSQL / Redis persistence (§8). Match results are in-memory only.
 - Moving/sliding/retracting/oscillating/rotating blockade types (§4 lists 11 types;

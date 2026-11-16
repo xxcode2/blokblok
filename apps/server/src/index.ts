@@ -14,7 +14,7 @@ import { RoomManager, type Room } from "./rooms.js";
 import type { MatchHooks } from "./match.js";
 
 const PORT = Number(process.env.PORT ?? 3001);
-// Server version tracks the protocol version (1.1.0, turn-based): it is
+// Server version tracks the protocol version (1.2.0, turn-based + trophy/4P): it is
 // what `welcome.serverVersion` and GET /health report.
 const SERVER_VERSION = PROTOCOL_VERSION;
 const MAX_INPUTS_PER_SEC = 30;
@@ -104,7 +104,7 @@ function leaveCurrentRoom(conn: Conn): void {
     rooms.delete(room.id);
     log(`room deleted code=${room.code} (empty)`);
   } else {
-    broadcastToRoom(room, { type: "lobbyUpdate", players: room.lobbyPlayers() });
+    broadcastToRoom(room, { type: "lobbyUpdate", mode: room.mode, playerCount: room.playerCount, players: room.lobbyPlayers() });
   }
 }
 
@@ -119,7 +119,17 @@ function registerToken(room: Room, playerId: string): string {
 // message handlers
 // ---------------------------------------------------------------------------
 function handleCreateRoom(conn: Conn, msg: Extract<ClientMessage, { type: "createRoom" }>): void {
-  if (msg.mode !== "race") return sendError(conn.ws, "BAD_REQUEST", "only mode 'race' is supported");
+  if (msg.mode !== "race" && msg.mode !== "trophy") {
+    return sendError(conn.ws, "BAD_REQUEST", "mode must be 'race' or 'trophy'");
+  }
+  // Race is always 2P; trophy is 2P or 4P (default 2).
+  const playerCount = msg.playerCount ?? 2;
+  if (msg.mode === "race" && playerCount !== 2) {
+    return sendError(conn.ws, "BAD_REQUEST", "race mode is 2 players only");
+  }
+  if (msg.mode === "trophy" && playerCount !== 2 && playerCount !== 4) {
+    return sendError(conn.ws, "BAD_REQUEST", "trophy playerCount must be 2 or 4");
+  }
   if (!VALID_GRID_SIZES.includes(msg.gridSize)) {
     return sendError(conn.ws, "BAD_REQUEST", "gridSize must be 12, 20, 30 or 40");
   }
@@ -128,12 +138,12 @@ function handleCreateRoom(conn: Conn, msg: Extract<ClientMessage, { type: "creat
       ? Math.min(600, Math.max(30, Math.floor(msg.durationSec)))
       : 180;
   leaveCurrentRoom(conn);
-  const room = rooms.create(msg.mode, msg.gridSize, durationSec);
+  const room = rooms.create(msg.mode, msg.gridSize, durationSec, playerCount);
   const player = room.addPlayer(conn.playerId!, conn.name || "Player", true);
   conn.roomId = room.id;
   const token = registerToken(room, player.id);
   send(conn.ws, { type: "roomCreated", roomId: room.id, roomCode: room.code, token });
-  log(`room created code=${room.code} host=${player.id} grid=${room.gridSize} dur=${durationSec}s`);
+  log(`room created code=${room.code} host=${player.id} mode=${room.mode} players=${room.playerCount} grid=${room.gridSize} dur=${durationSec}s`);
 }
 
 function handleJoinRoom(conn: Conn, msg: Extract<ClientMessage, { type: "joinRoom" }>): void {
@@ -143,7 +153,7 @@ function handleJoinRoom(conn: Conn, msg: Extract<ClientMessage, { type: "joinRoo
   const room = rooms.getByCode(msg.roomCode);
   if (!room) return sendError(conn.ws, "ROOM_NOT_FOUND", `no room with code ${msg.roomCode}`);
   if (room.status !== "lobby") return sendError(conn.ws, "BAD_REQUEST", "match already started");
-  if (room.isFull()) return sendError(conn.ws, "ROOM_FULL", "room already has 2 players");
+  if (room.isFull()) return sendError(conn.ws, "ROOM_FULL", `room already has ${room.playerCount} players`);
   leaveCurrentRoom(conn);
   const player = room.addPlayer(conn.playerId!, conn.name || "Player", false);
   conn.roomId = room.id;
@@ -153,6 +163,7 @@ function handleJoinRoom(conn: Conn, msg: Extract<ClientMessage, { type: "joinRoo
     roomId: room.id,
     roomCode: room.code,
     mode: room.mode,
+    playerCount: room.playerCount,
     gridSize: room.gridSize,
     durationSec: room.durationSec,
     players: room.lobbyPlayers(),
@@ -160,44 +171,63 @@ function handleJoinRoom(conn: Conn, msg: Extract<ClientMessage, { type: "joinRoo
   // Keep the token usable for reconnect (spec issues it at roomCreated /
   // matchFound; joining players need one too).
   void token;
-  broadcastToRoom(room, { type: "lobbyUpdate", players: room.lobbyPlayers() });
+  broadcastToRoom(room, { type: "lobbyUpdate", mode: room.mode, playerCount: room.playerCount, players: room.lobbyPlayers() });
   log(`room joined code=${room.code} player=${player.id}`);
 }
 
 function tryPairQueue(): void {
-  const pair = matchmaker.findPair();
-  if (!pair) return;
-  const [a, b] = pair;
-  const room = rooms.create(a.mode, a.gridSize as GridSize, 180);
-  const pa = room.addPlayer(a.playerId, a.name, true);
-  const pb = room.addPlayer(b.playerId, b.name, false);
-  const connA = connsByPlayer.get(a.playerId);
-  const connB = connsByPlayer.get(b.playerId);
-  if (connA) connA.roomId = room.id;
-  if (connB) connB.roomId = room.id;
-  const tokenA = registerToken(room, pa.id);
-  const tokenB = registerToken(room, pb.id);
+  // Group size comes from the oldest queued entry: 2 for race / 2P trophy,
+  // 4 for a 4P trophy room. The matchmaker only groups entries with the same
+  // mode + gridSize + playerCount, so a group is always uniform.
+  const group = matchmaker.findGroup(matchmaker.peekGroupSize());
+  if (!group) return;
+  const room = rooms.create(group[0].mode, group[0].gridSize as GridSize, 180, group[0].playerCount);
+  const added = group.map((entry, i) => ({ entry, player: room.addPlayer(entry.playerId, entry.name, i === 0) }));
+  for (const { entry } of added) {
+    const conn = connsByPlayer.get(entry.playerId);
+    if (conn) conn.roomId = room.id;
+  }
+  const tokensByPlayer = new Map(added.map(({ entry, player }) => [entry.playerId, registerToken(room, player.id)]));
   // Matchmade players are auto-ready; the host auto-starts shortly after
   // matchFound so a public match needs no lobby clicks.
-  room.setReady(pa.id, true);
-  room.setReady(pb.id, true);
-  sendTo(a.playerId, { type: "matchFound", roomId: room.id, roomCode: room.code, token: tokenA, opponent: { id: b.playerId, name: b.name } });
-  sendTo(b.playerId, { type: "matchFound", roomId: room.id, roomCode: room.code, token: tokenB, opponent: { id: a.playerId, name: a.name } });
-  log(`match found room=${room.code} ${a.playerId} vs ${b.playerId}`);
+  for (const { player } of added) room.setReady(player.id, true);
+  for (const { entry } of added) {
+    const opponents = group.filter((g) => g.playerId !== entry.playerId).map((g) => ({ id: g.playerId, name: g.name }));
+    sendTo(entry.playerId, {
+      type: "matchFound",
+      roomId: room.id,
+      roomCode: room.code,
+      token: tokensByPlayer.get(entry.playerId)!,
+      mode: room.mode,
+      playerCount: room.playerCount,
+      opponent: opponents[0],
+      opponents,
+    });
+  }
+  log(`match found room=${room.code} mode=${room.mode} players=${room.playerCount} ${group.map((g) => g.playerId).join(" vs ")}`);
   setTimeout(() => {
-    if (room.status === "lobby" && room.size === 2 && room.allReady()) {
+    if (room.status === "lobby" && room.size === room.playerCount && room.allReady()) {
       beginMatch(room);
     }
   }, 500);
 }
 
 function handleQueue(conn: Conn, msg: Extract<ClientMessage, { type: "queue" }>): void {
-  if (msg.mode !== "race") return sendError(conn.ws, "BAD_REQUEST", "only mode 'race' is supported");
+  if (msg.mode !== "race" && msg.mode !== "trophy") {
+    return sendError(conn.ws, "BAD_REQUEST", "mode must be 'race' or 'trophy'");
+  }
+  const playerCount = msg.playerCount ?? 2;
+  if (msg.mode === "race" && playerCount !== 2) {
+    return sendError(conn.ws, "BAD_REQUEST", "race mode is 2 players only");
+  }
+  if (msg.mode === "trophy" && playerCount !== 2 && playerCount !== 4) {
+    return sendError(conn.ws, "BAD_REQUEST", "trophy playerCount must be 2 or 4");
+  }
   if (!VALID_GRID_SIZES.includes(msg.gridSize)) {
     return sendError(conn.ws, "BAD_REQUEST", "gridSize must be 12, 20, 30 or 40");
   }
   leaveCurrentRoom(conn);
-  const position = matchmaker.enqueue(conn.playerId!, conn.name || "Player", msg.mode, msg.gridSize);
+  const position = matchmaker.enqueue(conn.playerId!, conn.name || "Player", msg.mode, msg.gridSize, playerCount);
   send(conn.ws, { type: "queued", position });
   tryPairQueue();
 }
@@ -304,7 +334,7 @@ function handleMessage(conn: Conn, raw: string): void {
       if (!room) return sendError(conn.ws, "BAD_REQUEST", "not in a room");
       if (room.status !== "lobby") return sendError(conn.ws, "BAD_REQUEST", "match already started");
       room.setReady(conn.playerId, msg.ready === true);
-      return broadcastToRoom(room, { type: "lobbyUpdate", players: room.lobbyPlayers() });
+      return broadcastToRoom(room, { type: "lobbyUpdate", mode: room.mode, playerCount: room.playerCount, players: room.lobbyPlayers() });
     }
     case "start": {
       const room = conn.roomId ? rooms.get(conn.roomId) : undefined;
@@ -342,7 +372,7 @@ function handleDisconnect(conn: Conn): void {
       rooms.delete(room.id);
       log(`room deleted code=${room.code} (empty after disconnect)`);
     } else {
-      broadcastToRoom(room, { type: "lobbyUpdate", players: room.lobbyPlayers() });
+      broadcastToRoom(room, { type: "lobbyUpdate", mode: room.mode, playerCount: room.playerCount, players: room.lobbyPlayers() });
     }
     return;
   }

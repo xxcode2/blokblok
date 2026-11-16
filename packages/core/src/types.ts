@@ -4,8 +4,10 @@
 
 export type Dir = "up" | "down" | "left" | "right";
 export type Orientation = "h" | "v";
-export type PlayerColor = "blue" | "red";
-export type GameMode = "race";
+export type PlayerColor = "blue" | "red" | "green" | "amber";
+export type GameMode = "race" | "trophy";
+/** Win reason: "goal" (race goal row) or "trophy" (trophy cell). */
+export type WinReason = "goal" | "trophy" | "timeout" | "forfeit" | "draw";
 export type MatchStatus = "lobby" | "countdown" | "playing" | "finished";
 export type GridSize = 12 | 20 | 30 | 40;
 
@@ -63,6 +65,10 @@ export interface Snapshot {
   tick: number;
   status: MatchStatus;
   mode: GameMode;
+  /** Number of players in the match (2, or 4 in trophy mode). */
+  playerCount: number;
+  /** Trophy cell in trophy mode (centre cell), null in race mode. */
+  trophy: { row: number; col: number } | null;
   gridSize: number;
   durationSec: number;
   timeLeftMs: number;
@@ -85,16 +91,16 @@ export type DeltaEvent =
   | { k: "score"; playerId: string; score: number }
   | { k: "turn"; activePlayerId: string; turnNumber: number; turnDeadlineMs: number }
   | { k: "collide"; playerId: string; row: number; col: number; tick: number }
-  | { k: "win"; winnerId: string | null; reason: "goal" | "timeout" | "forfeit" | "draw"; tick: number };
+  | { k: "win"; winnerId: string | null; reason: WinReason; tick: number };
 
 // ---------------------------------------------------------------------------
 // Client -> Server
 // ---------------------------------------------------------------------------
 export type ClientMessage =
   | { type: "hello"; name: string; clientVersion: string }
-  | { type: "createRoom"; mode: GameMode; gridSize: GridSize; durationSec: number }
+  | { type: "createRoom"; mode: GameMode; gridSize: GridSize; durationSec: number; playerCount?: 2 | 4 }
   | { type: "joinRoom"; roomCode: string }
-  | { type: "queue"; mode: GameMode; gridSize: number }
+  | { type: "queue"; mode: GameMode; gridSize: number; playerCount?: 2 | 4 }
   | { type: "leaveQueue" }
   | { type: "ready"; ready: boolean }
   | { type: "start" }
@@ -115,14 +121,30 @@ export type ServerMessage =
       roomId: string;
       roomCode: string;
       mode: GameMode;
+      playerCount: number;
       gridSize: number;
       durationSec: number;
       players: { id: string; name: string; ready: boolean; isHost: boolean }[];
     }
-  | { type: "lobbyUpdate"; players: { id: string; name: string; ready: boolean; isHost: boolean }[] }
+  | {
+      type: "lobbyUpdate";
+      mode: GameMode;
+      playerCount: number;
+      players: { id: string; name: string; ready: boolean; isHost: boolean }[];
+    }
   | { type: "queued"; position: number }
   | { type: "queueLeft" }
-  | { type: "matchFound"; roomId: string; roomCode: string; token: string; opponent: { id: string; name: string } }
+  | {
+      type: "matchFound";
+      roomId: string;
+      roomCode: string;
+      token: string;
+      mode: GameMode;
+      playerCount: number;
+      /** First opponent (2P compat); `opponents` lists all other players. */
+      opponent: { id: string; name: string };
+      opponents: { id: string; name: string }[];
+    }
   | { type: "countdown"; seconds: number }
   | { type: "matchStart"; snapshot: Snapshot }
   | { type: "state"; tick: number; snapshot: Snapshot }
@@ -130,7 +152,7 @@ export type ServerMessage =
   | {
       type: "result";
       winnerId: string | null;
-      reason: "goal" | "timeout" | "forfeit" | "draw";
+      reason: WinReason;
       scores: Record<string, number>;
       stats: Record<string, { moves: number; blockades: number }>;
       durationMs: number;
@@ -162,7 +184,7 @@ export interface MatchScores {
 // ---------------------------------------------------------------------------
 // Tunables (GAME_RULES.md)
 // ---------------------------------------------------------------------------
-export const PROTOCOL_VERSION = "1.1.0";
+export const PROTOCOL_VERSION = "1.2.0";
 /** One action per turn; a turn lasts 30 s, then auto-passes. */
 export const TURN_DURATION_MS = 30000;
 /** Energy regained at the start of each of your turns (capped at MAX_ENERGY). */
@@ -174,6 +196,15 @@ export const MAX_BLOCKADES_PER_PLAYER = 10;
 export const MAX_BLOCKADE_LEN = 4;
 export const DEFAULT_DURATION_SEC = 180;
 export const DEFAULT_GRID_SIZE: GridSize = 12;
+
+/** Trophy cell for an n×n grid: the centre cell (floor(n/2), floor(n/2)). */
+export function trophyCellFor(gridSize: number): { row: number; col: number } {
+  const c = Math.floor(gridSize / 2);
+  return { row: c, col: c };
+}
+
+/** Player colours in seat order: P1 blue, P2 red, P3 green, P4 amber. */
+export const PLAYER_COLORS: PlayerColor[] = ["blue", "red", "green", "amber"];
 
 export function blockadeCost(len: number): number {
   return len >= 3 ? 35 : 20;

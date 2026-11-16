@@ -10,16 +10,18 @@ export interface QueueEntry {
   name: string;
   mode: GameMode;
   gridSize: number;
+  /** Room size requested (2, or 4 for trophy mode). */
+  playerCount: number;
   enqueuedAtMs: number;
 }
 
 export class Matchmaker {
   private queue: QueueEntry[] = [];
 
-  enqueue(playerId: string, name: string, mode: GameMode, gridSize: number): number {
+  enqueue(playerId: string, name: string, mode: GameMode, gridSize: number, playerCount = 2): number {
     const existing = this.queue.findIndex((e) => e.playerId === playerId);
     if (existing >= 0) return existing + 1;
-    this.queue.push({ playerId, name, mode, gridSize, enqueuedAtMs: Date.now() });
+    this.queue.push({ playerId, name, mode, gridSize, playerCount, enqueuedAtMs: Date.now() });
     return this.queue.length;
   }
 
@@ -41,15 +43,37 @@ export class Matchmaker {
 
   /** Oldest two entries with the same mode + gridSize, or null. */
   findPair(): [QueueEntry, QueueEntry] | null {
+    const group = this.findGroup(2);
+    return group ? [group[0], group[1]] : null;
+  }
+
+  /** Player count requested by the oldest queued entry (2, or 4 for a 4P
+   *  trophy room); 2 when the queue is empty. */
+  peekGroupSize(): number {
+    return this.queue[0]?.playerCount ?? 2;
+  }
+
+  /**
+   * Oldest `count` entries with the same mode + gridSize + playerCount, or
+   * null. Used for 4P trophy rooms (count 4); race rooms always pair 2.
+   * Player count is part of the match key: a 2P trophy player never joins
+   * a 4P trophy room.
+   */
+  findGroup(count: number): QueueEntry[] | null {
     for (let i = 0; i < this.queue.length; i++) {
-      for (let j = i + 1; j < this.queue.length; j++) {
-        const a = this.queue[i];
-        const b = this.queue[j];
-        if (a.mode === b.mode && a.gridSize === b.gridSize) {
-          this.queue.splice(j, 1);
-          this.queue.splice(i, 1);
-          return [a, b];
+      const head = this.queue[i];
+      const group: QueueEntry[] = [head];
+      for (let j = i + 1; j < this.queue.length && group.length < count; j++) {
+        const cand = this.queue[j];
+        if (cand.mode === head.mode && cand.gridSize === head.gridSize && cand.playerCount === head.playerCount) {
+          group.push(cand);
         }
+      }
+      if (group.length === count) {
+        // Remove the grouped entries (highest index first to keep indices valid).
+        const idxs = group.map((g) => this.queue.indexOf(g)).sort((a, b) => b - a);
+        for (const k of idxs) this.queue.splice(k, 1);
+        return group;
       }
     }
     return null;

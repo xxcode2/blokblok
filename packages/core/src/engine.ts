@@ -1,8 +1,9 @@
 // BLOCKADE ARENA — authoritative game engine (shared by server + web client).
-// Implements GAME_RULES.md exactly: Race to the Top, edge-model blockades,
-// BFS fairness rule, turn-based energy (+10 at the start of your turn),
-// timer + timeout scoring. One action per turn (move 1 cell OR place 1
-// blockade); a turn lasts 30 s, then auto-passes (protocol 1.1.0).
+// Implements GAME_RULES.md exactly: Race to the Top and Trophy modes,
+// edge-model blockades, BFS fairness rule, turn-based energy (+10 at the
+// start of your turn), timer + timeout scoring. One action per turn (move 1
+// cell OR place 1 blockade); a turn lasts 30 s, then auto-passes
+// (protocol 1.2.0). 2 players in race mode, 2 or 4 in trophy mode.
 // The engine is deterministic and has no I/O; the server ticks it at 20/s,
 // the web client ticks a local copy for practice / local 2P / drag previews.
 
@@ -16,7 +17,9 @@ import {
   MAX_BLOCKADE_LEN,
   MAX_ENERGY,
   MOVE_ANIM_MS,
+  PLAYER_COLORS,
   scoreForOutcome,
+  trophyCellFor,
   TURN_DURATION_MS,
   type BlockadeState,
   type DeltaEvent,
@@ -25,8 +28,10 @@ import {
   type GameMode,
   type MatchStatus,
   type Orientation,
+  type PlayerColor,
   type PlayerState,
   type Snapshot,
+  type WinReason,
 } from "./types.js";
 
 export type EngineResult = { ok: true; events: DeltaEvent[] } | { ok: false; code: string; message: string };
@@ -40,7 +45,7 @@ export interface EngineOptions {
 interface PlayerInternal {
   id: string;
   name: string;
-  color: "blue" | "red";
+  color: PlayerColor;
   row: number;
   col: number;
   energy: number;
@@ -70,7 +75,7 @@ export class GameEngine {
   status: MatchStatus = "playing";
   timeLeftMs: number;
   winnerId: string | null = null;
-  winReason: "goal" | "timeout" | "forfeit" | "draw" | null = null;
+  winReason: WinReason | null = null;
   startedAtMs = 0;
   private players: PlayerInternal[] = [];
   /** occupied single edges, keyed by edgeKey */
@@ -83,7 +88,7 @@ export class GameEngine {
   /** Engine's view of wall-clock time (ms), set by start()/tickAt() and
    *  advanced by tickMs(dt). Turn deadlines are epoch ms on this clock. */
   private currentNowMs = 0;
-  /** Turn state (protocol 1.1.0): one action per turn, 30 s per turn. */
+  /** Turn state (protocol 1.2.0): one action per turn, 30 s per turn. */
   activePlayerId = "";
   turnNumber = 1;
   turnDeadlineMs = 0;
@@ -126,18 +131,39 @@ export class GameEngine {
     this.timeLeftMs = this.durationSec * 1000;
   }
 
+  /** Number of players currently in the match. */
+  get playerCount(): number {
+    return this.players.length;
+  }
+
+  /** Trophy cell in trophy mode (centre cell), null in race mode. */
+  get trophy(): { row: number; col: number } | null {
+    return this.mode === "trophy" ? trophyCellFor(this.gridSize) : null;
+  }
+
   // -- setup ---------------------------------------------------------------
   addPlayer(id: string, name: string): PlayerState {
-    if (this.players.length >= 2) throw new Error("Race mode supports exactly 2 players");
+    const maxPlayers = this.mode === "trophy" ? 4 : 2;
+    if (this.players.length >= maxPlayers) {
+      throw new Error(`${this.mode} mode supports at most ${maxPlayers} players`);
+    }
     const idx = this.players.length;
-    const color = idx === 0 ? ("blue" as const) : ("red" as const);
+    const color = PLAYER_COLORS[idx];
     const centre = Math.floor(this.gridSize / 2);
+    // Spawns: P1 bottom-centre, P2 top-centre, P3 left-centre, P4 right-centre.
+    // 2P trophy mode keeps the race spawns (P1 bottom, P2 top).
+    const spawn: { row: number; col: number }[] = [
+      { row: this.gridSize - 1, col: centre },
+      { row: 0, col: centre },
+      { row: centre, col: 0 },
+      { row: centre, col: this.gridSize - 1 },
+    ];
     const p: PlayerInternal = {
       id,
       name,
       color,
-      row: idx === 0 ? this.gridSize - 1 : 0,
-      col: centre,
+      row: spawn[idx].row,
+      col: spawn[idx].col,
       energy: MAX_ENERGY,
       score: 0,
       moves: 0,
@@ -187,14 +213,16 @@ export class GameEngine {
   }
 
   /**
-   * Pass the turn to the other player: they gain +10 energy (capped at 100)
-   * at the start of their turn, turnNumber += 1, and the new deadline is
-   * `deadlineMs + 30000` (for a timeout pass, the previous deadline keeps
-   * the schedule; for an action pass, the caller passes now + 30000).
-   * Emits a `turn` delta event (plus an `energy` event when energy changed).
+   * Pass the turn to the NEXT player in seat order (P1→P2→P3→P4→P1…): they
+   * gain +10 energy (capped at 100) at the start of their turn, turnNumber
+   * += 1, and the new deadline is `deadlineMs + 30000` (for a timeout pass,
+   * the previous deadline keeps the schedule; for an action pass, the caller
+   * passes now + 30000). Emits a `turn` delta event (plus an `energy` event
+   * when energy changed).
    */
   private passTurn(deadlineMs: number): DeltaEvent[] {
-    const next = this.players.find((q) => q.id !== this.activePlayerId);
+    const idx = this.players.findIndex((q) => q.id === this.activePlayerId);
+    const next = this.players[(idx + 1) % this.players.length];
     if (!next) return [];
     this.activePlayerId = next.id;
     this.turnNumber += 1;
@@ -214,6 +242,7 @@ export class GameEngine {
     return this.status === "playing" && this.activePlayerId === playerId;
   }
 
+  /** Goal row in race mode (P1/blue → row 0, everyone else → row N-1). */
   goalRow(p: PlayerInternal): number {
     return p.color === "blue" ? 0 : this.gridSize - 1;
   }
@@ -222,8 +251,23 @@ export class GameEngine {
     return Math.abs(p.row - this.goalRow(p));
   }
 
+  /** Shortest-path distance (in moves) from a player to their target:
+   *  the goal row in race mode, the trophy cell in trophy mode. Falls back
+   *  to Manhattan distance if no path exists (cannot happen while the BFS
+   *  fairness rule holds, but keeps timeout/progress total). */
+  distanceToTarget(p: PlayerInternal): number {
+    if (this.mode === "race") return this.rowsRemaining(p);
+    const bfs = this.shortestPathLength(p.id);
+    if (bfs !== null) return bfs;
+    const t = this.trophy!;
+    return Math.abs(p.row - t.row) + Math.abs(p.col - t.col);
+  }
+
   progress(p: PlayerInternal): number {
-    return 1 - this.rowsRemaining(p) / (this.gridSize - 1);
+    if (this.mode === "race") return 1 - this.rowsRemaining(p) / (this.gridSize - 1);
+    // Trophy: 0 at the farthest corner, 1 on the trophy cell.
+    const maxDist = 2 * Math.floor(this.gridSize / 2);
+    return Math.min(1, Math.max(0, 1 - this.distanceToTarget(p) / maxDist));
   }
 
   // -- edge model ----------------------------------------------------------
@@ -263,12 +307,15 @@ export class GameEngine {
   }
 
   // -- pathfinding (BFS fairness rule) --------------------------------------
-  /** Shortest path length in moves from a player's cell to their goal row,
-   *  or null if unreachable. `extra` edges are treated as blocked too. */
+  /** Shortest path length in moves from a player's cell to their target
+   *  (goal row in race mode, trophy cell in trophy mode), or null if
+   *  unreachable. `extra` edges are treated as blocked too. */
   shortestPathLength(playerId: string, extra?: Set<string>): number | null {
     const p = this.getPlayer(playerId);
     if (!p) return null;
-    const goal = this.goalRow(p);
+    const trophy = this.trophy;
+    const isTarget = (r: number, c: number): boolean =>
+      trophy ? r === trophy.row && c === trophy.col : r === this.goalRow(p);
     const blocked = (r: number, c: number, dir: Dir): boolean => {
       if (extra) {
         switch (dir) {
@@ -292,7 +339,7 @@ export class GameEngine {
     const queue: { r: number; c: number; d: number }[] = [{ r: p.row, c: p.col, d: 0 }];
     while (queue.length > 0) {
       const cur = queue.shift()!;
-      if (cur.r === goal) return cur.d;
+      if (isTarget(cur.r, cur.c)) return cur.d;
       for (const dir of Object.keys(DIRS) as Dir[]) {
         const { dr, dc } = DIRS[dir];
         const nr = cur.r + dr;
@@ -308,17 +355,24 @@ export class GameEngine {
     return null;
   }
 
-  /** Next direction along a shortest path to the goal, or null. */
-  nextStepTowardGoal(playerId: string): Dir | null {
+  /** Next direction along a shortest path to the player's target
+   *  (goal row in race mode, trophy cell in trophy mode), or null. */
+  nextStepTowardTarget(playerId: string): Dir | null {
     const p = this.getPlayer(playerId);
     if (!p) return null;
-    // BFS from the goal row backwards, then walk from the player.
-    const goal = this.goalRow(p);
+    // BFS from the target backwards, then walk from the player.
+    const trophy = this.trophy;
     const dist = new Map<string, number>();
     const queue: { r: number; c: number }[] = [];
-    for (let c = 0; c < this.gridSize; c++) {
-      dist.set(`${goal},${c}`, 0);
-      queue.push({ r: goal, c });
+    const seed = (r: number, c: number) => {
+      dist.set(`${r},${c}`, 0);
+      queue.push({ r, c });
+    };
+    if (trophy) {
+      seed(trophy.row, trophy.col);
+    } else {
+      const goal = this.goalRow(p);
+      for (let c = 0; c < this.gridSize; c++) seed(goal, c);
     }
     while (queue.length > 0) {
       const cur = queue.shift()!;
@@ -352,6 +406,12 @@ export class GameEngine {
     return null;
   }
 
+  /** Alias kept for callers that think in goal terms; in trophy mode the
+   *  "goal" is the trophy cell. */
+  nextStepTowardGoal(playerId: string): Dir | null {
+    return this.nextStepTowardTarget(playerId);
+  }
+
   // -- validation ------------------------------------------------------------
   /** Validate a blockade without applying it. Returns an error code or null. */
   validatePlace(playerId: string, edge: Edge): string | null {
@@ -373,7 +433,8 @@ export class GameEngine {
       }
       if (this.blocked.has(edgeKey(s))) return "INVALID_BLOCKADE";
     }
-    // BFS fairness: both players must keep a path to their goal.
+    // BFS fairness: EVERY player must keep a path to their target
+    // (goal row in race mode, trophy cell in trophy mode).
     const extra = new Set(singles.map((s) => edgeKey(s)));
     for (const q of this.players) {
       if (this.shortestPathLength(q.id, extra) === null) return "NO_PATH";
@@ -415,8 +476,12 @@ export class GameEngine {
     p.moves++;
     const events: DeltaEvent[] = [{ k: "move", playerId, row: nr, col: nc, tick: this.tickCount }];
     this.record(events);
-    if (nr === this.goalRow(p)) {
-      this.finish(p.id, "goal");
+    // Win check: race → stepping onto the goal row; trophy → stepping onto
+    // the trophy cell. Either wins immediately (reason "goal" / "trophy").
+    const trophy = this.trophy;
+    const won = trophy ? nr === trophy.row && nc === trophy.col : nr === this.goalRow(p);
+    if (won) {
+      this.finish(p.id, trophy ? "trophy" : "goal");
     } else {
       // One action per turn: a valid move passes the turn to the opponent.
       // passTurn records its own `turn` (+`energy`) delta events.
@@ -447,7 +512,7 @@ export class GameEngine {
     if (err) {
       const message =
         err === "NO_PATH"
-          ? "placement would leave a player with no path to their goal"
+          ? "placement would leave a player with no path to their target"
           : err === "NO_ENERGY"
             ? "not enough energy"
             : err === "NOT_YOUR_TURN"
@@ -595,7 +660,7 @@ export class GameEngine {
     return ownEvents;
   }
 
-  private finish(winnerId: string | null, reason: "goal" | "timeout" | "forfeit" | "draw"): void {
+  private finish(winnerId: string | null, reason: WinReason): void {
     this.status = "finished";
     this.winnerId = winnerId;
     this.winReason = reason;
@@ -614,11 +679,13 @@ export class GameEngine {
       this.finish(this.players[0]?.id ?? null, "timeout");
       return;
     }
-    const [a, b] = this.players;
-    const ra = this.rowsRemaining(a);
-    const rb = this.rowsRemaining(b);
-    if (ra === rb) this.finish(null, "draw");
-    else this.finish(ra < rb ? a.id : b.id, "timeout");
+    // Closest to the target wins (fewest rows in race, shortest path to the
+    // trophy in trophy mode); equal distance = draw.
+    const dists = this.players.map((p) => this.distanceToTarget(p));
+    const best = Math.min(...dists);
+    const leaders = this.players.filter((_, i) => dists[i] === best);
+    if (leaders.length === 1) this.finish(leaders[0].id, "timeout");
+    else this.finish(null, "draw");
   }
 
   forfeit(playerId: string): void {
@@ -696,6 +763,8 @@ export class GameEngine {
       tick: this.tickCount,
       status: this.status,
       mode: this.mode,
+      playerCount: this.players.length,
+      trophy: this.trophy ? { ...this.trophy } : null,
       gridSize: this.gridSize,
       durationSec: this.durationSec,
       timeLeftMs: this.timeLeftMs,

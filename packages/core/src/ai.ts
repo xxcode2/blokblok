@@ -70,11 +70,18 @@ function bestBlockingPlacement(engine: GameEngine, me: string, foe: string): Edg
 }
 
 export function chooseAiAction(engine: GameEngine, playerId: string, difficulty: AiDifficulty): AiAction | null {
-  // Turn model (protocol 1.1.0): the AI acts only on its own turn, picking
+  // Turn model (protocol 1.2.0): the AI acts only on its own turn, picking
   // exactly ONE move-or-blockade action per call (one per AI turn).
   if (!engine.isActivePlayer(playerId)) return null;
-  const foe = engine.snapshot().players.find((p) => p.id !== playerId);
-  if (!foe) return null;
+  const others = engine.snapshot().players.filter((p) => p.id !== playerId);
+  if (others.length === 0) return null;
+  // Block the most threatening opponent: the one closest to their target
+  // (goal row in race mode, trophy cell in trophy mode).
+  const foe = others.reduce((best, p) => {
+    const me = engine.getPlayer(best.id)!;
+    const cand = engine.getPlayer(p.id)!;
+    return engine.distanceToTarget(cand) < engine.distanceToTarget(me) ? p : best;
+  });
   const me = engine.getPlayer(playerId)!;
   const legal = engine.legalMoves(playerId);
   const step = engine.nextStepTowardGoal(playerId);

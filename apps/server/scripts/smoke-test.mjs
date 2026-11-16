@@ -1,5 +1,5 @@
 // BLOCKADE ARENA — server smoke test (scripted TURN-BASED 1v1 over raw WebSockets).
-// Protocol 1.1.0: one action per turn (move 1 cell OR place 1 blockade),
+// Protocol 1.2.0: one action per turn (move 1 cell OR place 1 blockade),
 // 30 s per turn, +10 energy at the start of your turn, turn 1 belongs to P1.
 // Run with the server already up:  npm start --workspace=@blockade/server
 // then:                                node apps/server/scripts/smoke-test.mjs
@@ -85,7 +85,7 @@ async function main() {
   const wa = await a.waitFor((m) => m.type === "welcome", 5000, "welcome A");
   const wb = await b.waitFor((m) => m.type === "welcome", 5000, "welcome B");
   check(wa.playerId && wb.playerId && wa.playerId !== wb.playerId, "welcome assigns distinct playerIds");
-  check(wa.serverVersion === "1.1.0", `welcome serverVersion is 1.1.0 (got ${wa.serverVersion})`);
+  check(wa.serverVersion === "1.2.0", `welcome serverVersion is 1.2.0 (got ${wa.serverVersion})`);
 
   // ping/pong
   a.send({ type: "ping", t: 123 });
@@ -205,14 +205,14 @@ async function main() {
 
   const health = await (await fetch(`${HTTP}/health`)).json();
   check(health.status === "ok", "GET /health returns ok");
-  check(health.protocol === "1.1.0", `GET /health protocol is 1.1.0 (got ${health.protocol})`);
-  check(health.version === "1.1.0", `GET /health version is 1.1.0 (got ${health.version})`);
+  check(health.protocol === "1.2.0", `GET /health protocol is 1.2.0 (got ${health.protocol})`);
+  check(health.version === "1.2.0", `GET /health version is 1.2.0 (got ${health.version})`);
 
   a.close();
   b.close();
   await sleep(200);
 
-  console.log("BLOCKADE ARENA smoke test — turn-based 1v1 scripted match (protocol 1.1.0)");
+  console.log("BLOCKADE ARENA smoke test — turn-based 1v1 scripted match (protocol 1.2.0)");
   console.log(notes.join("\n"));
   console.log(`broadcast gaps during play: n=${gaps.length} mean=${meanGap.toFixed(1)}ms max=${maxGap}ms stalls(>250ms)=${stalls}`);
   console.log(`total time: ${((Date.now() - t0) / 1000).toFixed(1)}s`);

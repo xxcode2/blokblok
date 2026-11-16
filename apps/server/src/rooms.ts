@@ -34,6 +34,8 @@ export class Room {
   readonly id: string;
   readonly code: string;
   readonly mode: GameMode;
+  /** Room capacity: 2, or 4 for a 4P trophy room. */
+  readonly playerCount: number;
   readonly gridSize: GridSize;
   readonly durationSec: number;
   readonly engine: GameEngine;
@@ -43,13 +45,14 @@ export class Room {
   match: Match | null = null;
   private countdownTimer: ReturnType<typeof setTimeout> | null = null;
 
-  constructor(id: string, code: string, mode: GameMode, gridSize: GridSize, durationSec: number) {
+  constructor(id: string, code: string, mode: GameMode, gridSize: GridSize, durationSec: number, playerCount = 2) {
     this.id = id;
     this.code = code;
     this.mode = mode;
+    this.playerCount = playerCount;
     this.gridSize = gridSize;
     this.durationSec = durationSec;
-    this.engine = new GameEngine({ gridSize, durationSec });
+    this.engine = new GameEngine({ gridSize, durationSec, mode });
     // The engine defaults to "playing" for local/practice use; a server
     // room holds it in the lobby until the countdown completes.
     this.engine.status = "lobby";
@@ -65,7 +68,7 @@ export class Room {
   }
 
   isFull(): boolean {
-    return this.players.size >= 2;
+    return this.players.size >= this.playerCount;
   }
 
   addPlayer(id: string, name: string, isHost: boolean): RoomPlayer {
@@ -95,7 +98,7 @@ export class Room {
   }
 
   allReady(): boolean {
-    return this.players.size === 2 && [...this.players.values()].every((p) => p.ready);
+    return this.players.size === this.playerCount && [...this.players.values()].every((p) => p.ready);
   }
 
   lobbyPlayers(): { id: string; name: string; ready: boolean; isHost: boolean }[] {
@@ -116,7 +119,7 @@ export class Room {
       if (this.status !== "countdown") return;
       this.status = "playing";
       const players = [...this.players.values()].map((p) => ({ id: p.id, name: p.name }));
-      this.match = new Match(this.id, this.engine, players as [typeof players[0], typeof players[0]], hooks);
+      this.match = new Match(this.id, this.engine, players, hooks);
       this.match.start(Date.now());
       onMatchStart();
     }, 3000);
@@ -144,11 +147,11 @@ export class RoomManager {
   private rooms = new Map<string, Room>();
   private byCode = new Map<string, Room>();
 
-  create(mode: GameMode, gridSize: GridSize, durationSec: number): Room {
+  create(mode: GameMode, gridSize: GridSize, durationSec: number, playerCount = 2): Room {
     const id = `room_${randomBytes(6).toString("hex")}`;
     let code = newRoomCode();
     while (this.byCode.has(code)) code = newRoomCode();
-    const room = new Room(id, code, mode, gridSize, durationSec);
+    const room = new Room(id, code, mode, gridSize, durationSec, playerCount);
     this.rooms.set(id, room);
     this.byCode.set(code, room);
     return room;

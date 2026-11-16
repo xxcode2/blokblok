@@ -41,7 +41,8 @@ export interface TickStats {
 export class Match {
   readonly id: string;
   readonly engine: GameEngine;
-  readonly players: [MatchPlayer, MatchPlayer];
+  /** All players in seat order (2 in race, 2 or 4 in trophy). */
+  readonly players: MatchPlayer[];
   private hooks: MatchHooks;
   private timer: ReturnType<typeof setInterval> | null = null;
   private queues = new Map<string, QueuedInput[]>();
@@ -51,7 +52,7 @@ export class Match {
   private finished = false;
   private startedAtMs = 0;
 
-  constructor(id: string, engine: GameEngine, players: [MatchPlayer, MatchPlayer], hooks: MatchHooks) {
+  constructor(id: string, engine: GameEngine, players: MatchPlayer[], hooks: MatchHooks) {
     this.id = id;
     this.engine = engine;
     this.players = players;
@@ -111,7 +112,7 @@ export class Match {
     const msg = input.msg;
     const sendError = (code: string, message: string) =>
       this.hooks.send(playerId, { type: "error", code, message });
-    // Authoritative turn enforcement (protocol 1.1.0): only the active
+    // Authoritative turn enforcement (protocol 1.2.0): only the active
     // player may act, and only once per turn. The engine enforces this too;
     // the check here rejects out-of-turn inputs before they reach it.
     if (this.engine.activePlayerId !== playerId) {

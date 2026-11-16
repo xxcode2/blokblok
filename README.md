@@ -9,15 +9,17 @@ Inspired by the reference board (grid arena, circular orbs, edge blockades, goal
 rows), rebuilt with a neon visual direction: dark graphite arena, glowing orbs,
 cyan energy blockades.
 
-## Status (milestone 1, 2026-11-16)
+## Status (milestone 1, 2026-11-17)
 
 - `packages/core` — shared TypeScript engine: grid/edge model, turn-based
   movement (one action per turn, 30 s turn timer with auto-pass, +10 energy
   at the start of your turn), blockades, BFS fairness validation, energy,
-  Race mode, AI (Easy/Normal/Hard). Protocol 1.1.0.
-  Tests: 42/42 pass.
+  Race mode, Trophy mode (centre-cell trophy, 2 or 4 players), AI
+  (Easy/Normal/Hard). Protocol 1.2.0.
+  Tests: 56/56 pass.
 - `apps/server` — Node.js + `ws`, server-authoritative 20 ticks/s, rooms by
-  6-char code, 1v1 matchmaking queue, reconnect tokens, in-memory results.
+  6-char code (2P race, 2P/4P trophy), matchmaking queue (groups by mode +
+  gridSize + playerCount), reconnect tokens, in-memory results.
 - `apps/web` — React + Vite + Canvas. Menu, lobby, online 1v1, practice vs AI,
   local 2P. Builds cleanly.
 - `apps/android` — **not built**: the agent assigned to it was refused by a
@@ -30,7 +32,7 @@ Full honest status, protocol and rules: [DEVELOPMENT.md](DEVELOPMENT.md),
 
 ```bash
 npm install
-npm run test --workspace=@blockade/core     # 42 unit tests
+npm run test --workspace=@blockade/core     # 56 unit tests
 npm run dev --workspace=@blockade/server    # ws://localhost:3001 (+ GET /health)
 npm run dev --workspace=@blockade/web       # http://localhost:5173
 ```
