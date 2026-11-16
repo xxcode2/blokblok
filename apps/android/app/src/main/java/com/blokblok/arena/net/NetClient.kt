@@ -288,11 +288,6 @@ fun applyDeltaToSnapshot(snap: com.blokblok.arena.game.Snapshot, events: List<co
             is com.blokblok.arena.game.DeltaEvent.Timer -> {
                 next = next.copy(timeLeftMs = e.timeLeftMs)
             }
-            is com.blokblok.arena.game.DeltaEvent.Score -> {
-                next = next.copy(
-                    players = next.players.map { if (it.id == e.playerId) it.copy(score = e.score) else it },
-                )
-            }
             is com.blokblok.arena.game.DeltaEvent.Collide -> {
                 // No state change — the renderer turns this into sparks + a thud.
             }
@@ -300,7 +295,7 @@ fun applyDeltaToSnapshot(snap: com.blokblok.arena.game.Snapshot, events: List<co
                 next = next.copy(winnerId = e.winnerId, status = com.blokblok.arena.game.MatchStatus.FINISHED)
             }
             is com.blokblok.arena.game.DeltaEvent.Turn -> {
-                // Turn passed (protocol 1.2.0): update whose turn it is, the
+                // Turn passed (protocol 1.3.0): update whose turn it is, the
                 // turn number, and the new turn deadline.
                 next = next.copy(
                     activePlayerId = e.activePlayerId,

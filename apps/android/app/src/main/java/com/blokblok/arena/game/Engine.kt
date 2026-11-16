@@ -3,12 +3,15 @@ package com.blokblok.arena.game
 // BLOCKADE ARENA — authoritative game engine (Kotlin port).
 // Implements GAME_RULES.md exactly: Race to the Top + Trophy mode,
 // edge-model blockades, BFS fairness rule, turn-based play, timer +
-// timeout scoring.
-// TURN-BASED model (protocol 1.2.0): one action per turn (move 1 cell OR
+// timeout tiebreak (no scoring — protocol 1.3.0 removed points entirely).
+// TURN-BASED model (protocol 1.3.0): one action per turn (move 1 cell OR
 // place 1 blockade), then the turn passes; the incoming player gains
 // ENERGY_PER_TURN energy (cap 100); a turn expires after TURN_DURATION_MS
 // and auto-passes with no other penalty. No cooldowns, no input buffering.
-// TROPHY mode (protocol 1.2.0): 2 or 4 players race to the centre trophy
+// Blockades are hard-capped at MAX_BLOCKADES_PER_PLAYER (10) per player
+// per match — placing with none left is rejected with NO_BLOCKADES, the
+// turn does NOT pass and energy does NOT change.
+// TROPHY mode (since protocol 1.2.0): 2 or 4 players race to the centre trophy
 // cell floor(n/2),floor(n/2); landing on it wins immediately (reason
 // "trophy"). 4P spawns: P1 bottom-centre, P2 top-centre, P3 left-centre
 // (green), P4 right-centre (amber); turns rotate P1→P2→P3→P4→P1…
@@ -37,7 +40,6 @@ internal class PlayerInternal(
     var row: Int,
     var col: Int,
     var energy: Double,
-    var score: Int,
     var moves: Int,
     var blockadesPlaced: Int,
     var anim: MoveAnim?,
@@ -103,7 +105,11 @@ class GameEngine(
                 eng.players += PlayerInternal(
                     id = ps.id, name = ps.name, color = ps.color,
                     row = ps.row, col = ps.col, energy = ps.energy.toDouble(),
-                    score = ps.score, moves = 0, blockadesPlaced = 0,
+                    moves = 0,
+                    // blockadesLeft (10 − placed) is authoritative in the
+                    // snapshot; derive the placed count from it.
+                    blockadesPlaced = (MAX_BLOCKADES_PER_PLAYER - ps.blockadesLeft)
+                        .coerceIn(0, MAX_BLOCKADES_PER_PLAYER),
                     anim = ps.anim?.let {
                         MoveAnim(it.fromRow, it.fromCol, it.toRow, it.toCol, it.startTick, it.durationMs)
                     },
@@ -157,7 +163,7 @@ class GameEngine(
             id = id, name = name, color = color,
             row = spawnRow, col = spawnCol,
             energy = MAX_ENERGY.toDouble(),
-            score = 0, moves = 0, blockadesPlaced = 0, anim = null,
+            moves = 0, blockadesPlaced = 0, anim = null,
         )
         players += p
         if (idx == 0) activePlayerId = id
@@ -383,7 +389,10 @@ class GameEngine(
         if (status != MatchStatus.PLAYING) return "INVALID_BLOCKADE"
         turnError(playerId)?.let { return it }
         if (edge.len < 1 || edge.len > MAX_BLOCKADE_LEN) return "INVALID_BLOCKADE"
-        if (blockades.count { it.playerId == playerId } >= MAX_BLOCKADES_PER_PLAYER) return "INVALID_BLOCKADE"
+        // Hard cap: 10 blockades per player per match. Reject with the
+        // dedicated NO_BLOCKADES code (not INVALID_BLOCKADE) so the client
+        // can show "Blok habis"; the turn does NOT pass, energy unchanged.
+        if (p.blockadesPlaced >= MAX_BLOCKADES_PER_PLAYER) return ERR_NO_BLOCKADES
         if (blockadeCost(edge.len) > p.energy) return "NO_ENERGY"
         val singles = edgesForBlockade(edge)
         for (s in singles) {
@@ -458,6 +467,7 @@ class GameEngine(
             val message = when (err) {
                 "NO_PATH" -> "placement would leave a player with no path to their goal"
                 "NO_ENERGY" -> "not enough energy"
+                ERR_NO_BLOCKADES -> "no blockades left (max $MAX_BLOCKADES_PER_PLAYER per match)"
                 ERR_NOT_YOUR_TURN -> "not your turn"
                 else -> "invalid blockade placement"
             }
@@ -501,6 +511,9 @@ class GameEngine(
     /** Button placement: nearest valid blockade ahead of the player in `dir`. */
     fun placeAuto(playerId: String, dir: Dir, orientation: Orientation, len: Int): EngineResult {
         val p = getPlayer(playerId) ?: return EngineResult.Err("NOT_IN_MATCH", "player not in match")
+        if (p.blockadesPlaced >= MAX_BLOCKADES_PER_PLAYER) {
+            return EngineResult.Err(ERR_NO_BLOCKADES, "no blockades left (max $MAX_BLOCKADES_PER_PLAYER per match)")
+        }
         val n = gridSize
         for (d in 0 until n) {
             val anchors = mutableListOf<Edge>()
@@ -588,15 +601,8 @@ class GameEngine(
         status = MatchStatus.FINISHED
         this.winnerId = winnerId
         winReason = reason
-        val secsLeft = (timeLeftMs / 1000).toInt()
-        val events = mutableListOf<DeltaEvent>()
-        events += DeltaEvent.Win(winnerId, reason, tickCount)
-        for (p in players) {
-            val outcome = if (winnerId == null) "draw" else if (p.id == winnerId) "win" else "loss"
-            p.score = scoreForOutcome(outcome, if (outcome == "win") secsLeft else 0)
-            events += DeltaEvent.Score(p.id, p.score)
-        }
-        record(events)
+        // No points system (protocol 1.3.0): win/lose/draw only.
+        record(listOf(DeltaEvent.Win(winnerId, reason, tickCount)))
     }
 
     private fun finishByTimeout() {
@@ -660,7 +666,8 @@ class GameEngine(
             id = p.id, name = p.name, color = p.color,
             row = p.row, col = p.col,
             energy = p.energy.toInt(),
-            score = p.score,
+            blockadesLeft = (MAX_BLOCKADES_PER_PLAYER - p.blockadesPlaced)
+                .coerceIn(0, MAX_BLOCKADES_PER_PLAYER),
             progress = progress(p),
             anim = animOut,
         )
@@ -700,7 +707,9 @@ fun validateEdgeAgainstSnapshot(snap: Snapshot, playerId: String, edge: Edge): S
     if (snap.status != MatchStatus.PLAYING) return "INVALID_BLOCKADE"
     if (snap.activePlayerId.isNotBlank() && playerId != snap.activePlayerId) return ERR_NOT_YOUR_TURN
     if (edge.len < 1 || edge.len > MAX_BLOCKADE_LEN) return "INVALID_BLOCKADE"
-    if (snap.blockades.count { it.playerId == playerId } >= MAX_BLOCKADES_PER_PLAYER) return "INVALID_BLOCKADE"
+    // Hard cap: 10 blockades per player per match (NO_BLOCKADES, not
+    // INVALID_BLOCKADE) — the drag preview turns red when out of blocks.
+    if (p.blockadesLeft <= 0) return ERR_NO_BLOCKADES
     if (blockadeCost(edge.len) > p.energy) return "NO_ENERGY"
     val n = snap.gridSize
     val blocked = HashSet<String>()

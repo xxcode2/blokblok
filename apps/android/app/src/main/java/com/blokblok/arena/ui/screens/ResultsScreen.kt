@@ -1,6 +1,10 @@
 package com.blokblok.arena.ui.screens
 
-// BLOCKADE ARENA — results screen: winner, score, stats, rematch, menu.
+// BLOCKADE ARENA — results screen: winner, reason, match stats, rematch, menu.
+// No points system (protocol 1.3.0): win/lose/draw only, with per-player
+// stats (moves, blockades placed) instead of scores.
+// Known gap: still a 2-player layout (you vs the first opponent); in a 4P
+// match the other two players' stats are not shown here yet.
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -82,23 +86,23 @@ fun ResultsScreen(
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(me?.name ?: "You", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                Text("${me?.score ?: 0}", color = NeonCyan, fontSize = 36.sp, fontWeight = FontWeight.Black)
-                Text("points", color = TextSecondary, fontSize = 12.sp)
+                val myStats = result?.stats?.get(myId)
+                Text(
+                    "Langkah: ${myStats?.moves ?: 0} · Blokade: ${myStats?.blockades ?: 0}",
+                    color = NeonCyan, fontSize = 16.sp, fontWeight = FontWeight.Bold,
+                )
             }
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(foe?.name ?: "Opponent", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                Text("${foe?.score ?: 0}", color = NeonRed, fontSize = 36.sp, fontWeight = FontWeight.Black)
-                Text("points", color = TextSecondary, fontSize = 12.sp)
+                val foeStats = foe?.let { result?.stats?.get(it.id) }
+                Text(
+                    "Langkah: ${foeStats?.moves ?: 0} · Blokade: ${foeStats?.blockades ?: 0}",
+                    color = NeonRed, fontSize = 16.sp, fontWeight = FontWeight.Bold,
+                )
             }
         }
 
         Spacer(Modifier.height(16.dp))
-        val myStats = result?.stats?.get(myId)
-        val foeStats = foe?.let { result?.stats?.get(it.id) }
-        Text(
-            "Blockades placed — you: ${myStats?.blockades ?: 0} · opponent: ${foeStats?.blockades ?: 0}",
-            color = TextSecondary, fontSize = 13.sp,
-        )
         result?.let {
             val secs = it.durationMs / 1000
             Text("Match length: ${secs / 60}:${"%02d".format(secs % 60)}", color = TextSecondary, fontSize = 13.sp)

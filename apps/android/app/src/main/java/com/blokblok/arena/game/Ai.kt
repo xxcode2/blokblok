@@ -3,7 +3,7 @@ package com.blokblok.arena.game
 // BLOCKADE ARENA — AI opponents (practice mode).
 // Kotlin port of packages/core/src/ai.ts. AI uses only legal actions through
 // the public engine API — same rules as humans.
-// TURN-BASED (protocol 1.2.0): the AI picks a SINGLE move-or-blockade action
+// TURN-BASED (protocol 1.3.0): the AI picks a SINGLE move-or-blockade action
 // per turn (one call per AI turn, enforced by the caller + the turn guard
 // in chooseAiAction); the engine then passes the turn.
 // TROPHY mode: the AI targets the trophy cell (shortest path — the engine's

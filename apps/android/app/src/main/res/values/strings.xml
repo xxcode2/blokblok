@@ -70,8 +70,6 @@
     <string name="results_reason_forfeit">opponent forfeited</string>
     <string name="results_reason_draw">draw — equal distance to the goal</string>
     <string name="results_match_length">Match length: %1$s</string>
-    <string name="results_rating">Ranked-lite: %1$s%2$d pts</string>
-    <string name="results_score">Score</string>
     <string name="results_moves">Moves</string>
     <string name="results_blockades">Blockades</string>
     <string name="results_player">Player</string>

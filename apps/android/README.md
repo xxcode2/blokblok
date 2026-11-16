@@ -9,9 +9,10 @@ port of `packages/core` so Practice vs AI and Local 2P work fully offline.
 > **No APK was produced in this workspace.** This VM has no Java and no Android
 > SDK, so the project could not be compiled here. The Gradle project is complete
 > and written to build, but it has **not** been verified by a compiler run —
-> that includes the protocol 1.2.0 trophy-mode + 4-player revision
-> (2026-11-17): the code was verified statically only (brace balance,
-> cross-file symbol checks, protocol-string checks — see the track report).
+> that includes the protocol 1.3.0 revision (2026-11-17): no points system
+> anywhere + hard 10-blockade cap per player per match. The code was
+> verified statically only (brace balance, cross-file symbol checks,
+> protocol-string checks — see the track report).
 > Build it on a machine with Android Studio (or JDK 17 + Android SDK) with:
 >
 > ```bash
@@ -31,16 +32,20 @@ port of `packages/core` so Practice vs AI and Local 2P work fully offline.
 | Splash | Logo + tagline, ~0.9 s, then menu. |
 | Main Menu | Play Online (quick match), Private Room (create/join by code), Practice vs AI (Easy/Normal/Hard), Local 2P (one device, offline), Settings. Mode picker: Race to the Top (2P) or Rebut Piala (trophy, 2P or 4P). |
 | Lobby (online) | Room code (copyable), player slots, ready toggle, host starts when all are ready, countdown. Queue shows your position. |
-| Game | Native Canvas board, HUD (scores, energy bars, timer, connection dot), virtual joystick + swipe to move, drag on grid edges to place blockades (green/red validity preview + snap), quick-place H/V buttons, haptics, synthesized SoundPool effects. Landscape while playing. |
-| Results | Winner, reason, scores, blockade counts, match length, Rematch / Back to menu. Match history is saved to Room. |
+| Game | Native Canvas board, HUD (energy bars, blockade counts, timer, connection dot), virtual joystick + swipe to move, drag on grid edges to place blockades (green/red validity preview + snap), quick-place H/V buttons, haptics, synthesized SoundPool effects. Landscape while playing. |
+| Results | Winner, reason, match stats (moves, blockades placed), match length, Rematch / Back to menu. Match history is saved to Room. |
 | Settings | Player name, server URL, grid size, sound + haptics toggles (DataStore). |
 
 ## How it plays
 
 - **Race to the Top** (same rules as `GAME_RULES.md`): blue starts bottom-centre,
-  red starts top-centre; first to the opposite goal row wins. 150 ms move
-  cooldown, input buffering, 180 s timer (timeout → closer player wins).
-- **Rebut Piala / Trophy mode** (protocol 1.2.0): a gold trophy sits on the
+  red starts top-centre; first to the opposite goal row wins. Turn-based:
+  one action per turn (move 1 cell OR place 1 blockade), 30 s per turn with
+  auto-pass, +10 energy at the start of your turn, 180 s timer (timeout →
+  closer player wins). **No points system** (protocol 1.3.0): matches are
+  win/lose/draw only — no scores anywhere, in the engine, the wire format,
+  the HUD, or the results screen.
+- **Rebut Piala / Trophy mode** (since protocol 1.2.0): a gold trophy sits on the
   centre cell `floor(n/2), floor(n/2)` — 12×12 → (6,6), 20×20 → (10,10).
   First player to land on it wins immediately (reason `trophy`). 2 or 4
   players: P1 blue bottom-centre, P2 red top-centre, P3 green (#22c55e)
@@ -52,9 +57,14 @@ port of `packages/core` so Practice vs AI and Local 2P work fully offline.
   Practice: you vs 1 AI (2P) or vs 3 AI (4P trophy); the AI targets the
   trophy and blocks the opponent closest to it.
 - **Blockades**: drag on a grid edge, extend to length 1–4. Cost 20 energy
-  (len 1–2) / 35 (len 3–4), max 100 energy, regen 5/s, 500 ms place cooldown,
-  max 10 active per player. Placement is rejected if either player loses all
-  paths to goal (BFS fairness) — the preview turns red before you release.
+  (len 1–2) / 35 (len 3–4), max 100 energy, +10 energy at the start of each
+  of your turns (capped at 100). **Hard cap: 10 blockades per player per
+  match** — the HUD shows "Blok: X/10" per player, the quick-place buttons
+  disable at 0 ("Blok habis"), the drag preview turns red when out of
+  blocks, and placing with none left is rejected with `NO_BLOCKADES`
+  (turn does not pass, energy unchanged). Placement is rejected if either
+  player loses all paths to goal (BFS fairness) — the preview turns red
+  before you release.
 - **Local 2P**: swipe starting on the top half of the board moves P2 (red),
   bottom half moves P1 (blue); the joystick always drives P1.
 - **Practice vs AI**: Easy wanders with noise, Normal blocks when it helps,
@@ -80,7 +90,7 @@ port of `packages/core` so Practice vs AI and Local 2P work fully offline.
 ## Networking (same protocol as the web client)
 
 Ktor WebSocket client (`net/NetClient.kt`) speaking the `DEVELOPMENT.md`
-JSON protocol (version **1.2.0**) against `ws://<host>:3001`:
+JSON protocol (version **1.3.0**) against `ws://<host>:3001`:
 
 - Client → server: `hello`, `createRoom` (mode + playerCount), `joinRoom`,
   `queue` (mode + playerCount), `leaveQueue`,
@@ -89,8 +99,11 @@ JSON protocol (version **1.2.0**) against `ws://<host>:3001`:
 - Server → client: `welcome`, `roomCreated`, `roomJoined` (mode +
   playerCount), `lobbyUpdate`, `queued`, `queueLeft`, `matchFound` (mode +
   playerCount + opponents), `countdown`, `matchStart`, `state`, `delta`,
-  `result` (reason `trophy` possible), `opponentLeft`, `error`, `pong`,
-  `reconnected`. Snapshots carry `mode`, `playerCount` and `trophy`.
+  `result` (reason `trophy` possible; no `scores` — win/lose/draw only),
+  `opponentLeft`, `error` (incl. `NO_BLOCKADES` when out of blockades),
+  `pong`, `reconnected`. Snapshots carry `mode`, `playerCount`, `trophy`,
+  and per-player `blockadesLeft` (10 − blockades placed); there is no
+  `score` field and no `score` delta any more.
 - Reconnect: keeps the session token; if the socket drops mid-match it
   retries up to 6 times with exponential backoff (1 s → 8 s) and sends
   `reconnect` with the token. Ping every 2 s; latency shown in the HUD.
@@ -119,7 +132,7 @@ apps/android/
             ├── ArenaApp.kt           # NavHost + settings/sound/history wiring
             ├── game/
             │   ├── Types.kt          # protocol types + tunables (port of core types.ts)
-            │   ├── Engine.kt         # full engine port (movement, blockades, BFS, timer, scoring)
+            │   ├── Engine.kt         # full engine port (movement, blockades, BFS, timer, turn-based play; no scoring)
             │   ├── Ai.kt             # Easy/Normal/Hard (port of core ai.ts)
             │   ├── BoardRenderer.kt  # native Canvas renderer + animation system
             │   ├── Input.kt          # edge picking, drag-extend, swipe/joystick dirs
@@ -148,9 +161,9 @@ apps/android/
 
 - Not compiled or run on a device here (no JDK/SDK on this VM) — see build
   status above. Treat the first real build as the verification step.
-- Results screen shows you vs the first opponent only (score layout is
-  still 2-player); in a 4P match the other two players' scores are not
-  shown there yet. The HUD/scoreboard in-game lists all players.
+- Results screen shows you vs the first opponent only (stats layout is
+  still 2-player); in a 4P match the other two players' stats are not
+  shown there yet. The HUD in-game lists all players.
 - `forfeit` crowns the first other player as winner, which is only
   meaningful in 2P; 4P forfeit handling is server-defined.
 - No ranked ladder / matchmaking rating yet (Ranked-lite = casual queue).

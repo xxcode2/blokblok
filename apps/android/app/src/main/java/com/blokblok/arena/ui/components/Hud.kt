@@ -1,6 +1,6 @@
 package com.blokblok.arena.ui.components
 
-// BLOCKADE ARENA — HUD (energy bar, timer, scores, connection) and the
+// BLOCKADE ARENA — HUD (energy bar, blockade count, timer, connection) and the
 // virtual touch joystick. Both are pure Compose; the joystick reports a
 // direction the moment it crosses its dead zone (spec §13).
 
@@ -58,11 +58,12 @@ fun playerColorCompose(color: PlayerColor): Color = when (color) {
     PlayerColor.AMBER -> NeonAmber
 }
 
-/** One scoreboard row: name, score, energy, colour, seat label, active-turn flag. */
+/** One HUD row: name, energy, blockades left (10 − placed), colour,
+ *  seat label, active-turn flag. No points system (protocol 1.3.0). */
 data class PlayerHudEntry(
     val name: String,
-    val score: Int,
     val energy: Int,
+    val blockadesLeft: Int,
     val color: PlayerColor,
     val label: String,
     val isActive: Boolean = false,
@@ -102,7 +103,7 @@ fun Hud(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Scoreboard: one compact column per player (2 or 4).
+            // HUD: one compact column per player (2 or 4).
             Row(modifier = Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 for (entry in players) {
                     val color = playerColorCompose(entry.color)
@@ -119,8 +120,6 @@ fun Hud(
                                 fontWeight = if (entry.isActive) FontWeight.Bold else FontWeight.Normal,
                                 fontSize = 13.sp,
                             )
-                            Spacer(Modifier.width(6.dp))
-                            Text("${entry.score}", color = color, fontWeight = FontWeight.Bold, fontSize = 16.sp)
                         }
                         Spacer(Modifier.height(4.dp))
                         LinearProgressIndicator(
@@ -129,7 +128,16 @@ fun Hud(
                             color = color,
                             trackColor = Color(0xFF1E293B),
                         )
-                        Text("Energy ${entry.energy}", color = TextSecondary, fontSize = 11.sp)
+                        Row {
+                            Text("Energy ${entry.energy}", color = TextSecondary, fontSize = 11.sp)
+                            Spacer(Modifier.width(8.dp))
+                            Text(
+                                "Blok: ${entry.blockadesLeft}/10",
+                                color = if (entry.blockadesLeft <= 0) NeonRed else TextSecondary,
+                                fontWeight = if (entry.blockadesLeft <= 0) FontWeight.Bold else FontWeight.Normal,
+                                fontSize = 11.sp,
+                            )
+                        }
                     }
                 }
             }
@@ -148,7 +156,7 @@ fun Hud(
     }
 }
 
-/** Turn banner (protocol 1.2.0): whose turn it is + the turn number.
+/** Turn banner (protocol 1.3.0): whose turn it is + the turn number.
  *  [label] is e.g. "Giliran kamu", "Giliran lawan", or "Giliran P1".."Giliran P4"
  *  in local modes; [activeColor] is the active player's orb colour. */
 @Composable

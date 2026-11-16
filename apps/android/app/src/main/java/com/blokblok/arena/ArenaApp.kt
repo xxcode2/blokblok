@@ -75,7 +75,6 @@ fun ArenaApp(gameViewModel: GameViewModel) {
     LaunchedEffect(result) {
         val r = result ?: return@LaunchedEffect
         val snap = gameViewModel.snapshot.value ?: return@LaunchedEffect
-        val me = snap.players.find { it.id == myId }
         val foe = snap.players.find { it.id != myId }
         val outcome = when {
             r.winnerId == null -> "DRAW"
@@ -88,8 +87,6 @@ fun ArenaApp(gameViewModel: GameViewModel) {
                     mode = (pendingConfig?.kind?.name ?: "ONLINE"),
                     opponentName = foe?.name ?: "Opponent",
                     result = outcome,
-                    myScore = me?.score ?: 0,
-                    oppScore = foe?.score ?: 0,
                     durationMs = r.durationMs,
                 ),
             )

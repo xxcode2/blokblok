@@ -96,7 +96,7 @@ fun MenuScreen(
     onSettings: () -> Unit,
 ) {
     var showPracticePicker by remember { mutableStateOf(false) }
-    // Mode picker (protocol 1.2.0): Race to the Top (2P) or Rebut Piala
+    // Mode picker (protocol 1.3.0): Race to the Top (2P) or Rebut Piala
     // (trophy, 2P or 4P). Player count is locked to 2 in race mode.
     var selectedMode by remember { mutableStateOf(GameMode.RACE) }
     var selectedPlayerCount by remember { mutableStateOf(2) }

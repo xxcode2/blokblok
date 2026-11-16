@@ -26,7 +26,8 @@ data class PlayerState(
     val row: Int,
     val col: Int,
     val energy: Int,
-    val score: Int,
+    /** Blockades still available this match: 10 − blockades placed. */
+    val blockadesLeft: Int,
     /** 0..1 fraction of the way to the goal row. */
     val progress: Float,
     /** In-flight move animation (render hint). */
@@ -84,7 +85,6 @@ sealed interface DeltaEvent {
     data class Blockade(val blockade: BlockadeState) : DeltaEvent
     data class Energy(val playerId: String, val energy: Int) : DeltaEvent
     data class Timer(val timeLeftMs: Long) : DeltaEvent
-    data class Score(val playerId: String, val score: Int) : DeltaEvent
     data class Collide(val playerId: String, val row: Int, val col: Int, val tick: Long) : DeltaEvent
     data class Win(
         val winnerId: String?,
@@ -112,7 +112,6 @@ data class LobbyPlayer(
 data class MatchResultData(
     val winnerId: String?,
     val reason: WinReason,
-    val scores: Map<String, Int>,
     val stats: Map<String, PlayerStats>,
     val durationMs: Long,
     val players: List<PlayerState>,
@@ -121,14 +120,18 @@ data class MatchResultData(
 data class PlayerStats(val moves: Int, val blockades: Int)
 
 // ---------------------------------------------------------------------------
-// Tunables (GAME_RULES.md) — TURN-BASED model, protocol 1.2.0.
+// Tunables (GAME_RULES.md) — TURN-BASED model, protocol 1.3.0.
 // One action per turn (move 1 cell OR place 1 blockade); the turn then
 // passes. No move/place cooldowns and no input buffering any more.
 // Modes: RACE (2 players, goal rows) and TROPHY (2 or 4 players, centre
 // trophy cell wins). Trophy mode + 4 players: P3 green spawns left-centre,
 // P4 amber spawns right-centre; turns rotate P1→P2→P3→P4→P1…
+// NO POINTS SYSTEM (protocol 1.3.0): there is no score anywhere — matches
+// are win/lose/draw only, decided by goal/trophy/timeout/forfeit.
+// Blockades are hard-capped at MAX_BLOCKADES_PER_PLAYER per player per
+// match; placing with none left is rejected with NO_BLOCKADES.
 // ---------------------------------------------------------------------------
-const val PROTOCOL_VERSION = "1.2.0"
+const val PROTOCOL_VERSION = "1.3.0"
 const val TURN_DURATION_MS = 30000L
 /** Energy gained by the incoming player at the start of each of their turns. */
 const val ENERGY_PER_TURN = 10
@@ -145,13 +148,12 @@ const val SERVER_TICK_MS = 50L
 /** Error code when a player acts while it is not their turn. */
 const val ERR_NOT_YOUR_TURN = "NOT_YOUR_TURN"
 
-fun blockadeCost(len: Int): Int = if (len >= 3) 35 else 20
+/** Error code when a player tries to place a blockade after using all
+ *  MAX_BLOCKADES_PER_PLAYER blockades in this match. The turn does NOT
+ *  pass and energy does NOT change. */
+const val ERR_NO_BLOCKADES = "NO_BLOCKADES"
 
-fun scoreForOutcome(outcome: String, secondsRemaining: Int): Int = when (outcome) {
-    "win" -> 100 + 2 * secondsRemaining
-    "draw" -> 25
-    else -> 0
-}
+fun blockadeCost(len: Int): Int = if (len >= 3) 35 else 20
 
 val DIRS: Map<Dir, Pair<Int, Int>> = mapOf(
     Dir.UP to (-1 to 0),

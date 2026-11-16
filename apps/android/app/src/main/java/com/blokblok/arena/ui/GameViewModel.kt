@@ -12,6 +12,7 @@ import com.blokblok.arena.game.AiDifficulty
 import com.blokblok.arena.game.Dir
 import com.blokblok.arena.game.Edge
 import com.blokblok.arena.game.EngineResult
+import com.blokblok.arena.game.ERR_NO_BLOCKADES
 import com.blokblok.arena.game.ERR_NOT_YOUR_TURN
 import com.blokblok.arena.game.GameEngine
 import com.blokblok.arena.game.GameMode
@@ -196,7 +197,6 @@ class GameViewModel : ViewModel() {
     }
 
     private fun finishLocal(snap: Snapshot) {
-        val scores = snap.players.associate { it.id to it.score }
         val engStats = engine?.stats()
         val stats = snap.players.associate {
             it.id to (engStats?.get(it.id) ?: PlayerStats(
@@ -209,7 +209,6 @@ class GameViewModel : ViewModel() {
             reason = if (snap.winnerId == null) WinReason.DRAW
                 else if (snap.timeLeftMs <= 0) WinReason.TIMEOUT
                 else if (snap.mode == GameMode.TROPHY) WinReason.TROPHY else WinReason.GOAL,
-            scores = scores,
             stats = stats,
             durationMs = (snap.durationSec * 1000L) - snap.timeLeftMs,
         )
@@ -303,12 +302,13 @@ class GameViewModel : ViewModel() {
                 _error.value = "Opponent left the match."
             }
             is ServerMessage.Error -> {
-                // NOT_YOUR_TURN (protocol 1.2.0): the server rejected an
+                // NOT_YOUR_TURN (protocol 1.3.0): the server rejected an
                 // off-turn input — surface it plainly, it is not fatal.
-                _error.value = if (msg.code == ERR_NOT_YOUR_TURN) {
-                    "Bukan giliranmu — tunggu giliran berikutnya."
-                } else {
-                    msg.message
+                // NO_BLOCKADES: the player has used all 10 blockades.
+                _error.value = when (msg.code) {
+                    ERR_NOT_YOUR_TURN -> "Bukan giliranmu — tunggu giliran berikutnya."
+                    ERR_NO_BLOCKADES -> "Blok habis — kamu sudah memakai 10 blokade di pertandingan ini."
+                    else -> msg.message
                 }
             }
             is ServerMessage.Pong -> Unit

@@ -92,8 +92,6 @@ data class MatchRecord(
     val mode: String,
     val opponentName: String,
     val result: String, // WIN / LOSS / DRAW
-    val myScore: Int,
-    val oppScore: Int,
     val durationMs: Long,
     val playedAt: Long = System.currentTimeMillis(),
 )

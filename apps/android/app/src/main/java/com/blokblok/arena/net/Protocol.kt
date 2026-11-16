@@ -1,16 +1,20 @@
 package com.blokblok.arena.net
 
-// BLOCKADE ARENA — WebSocket protocol (JSON text frames), version 1.2.0.
+// BLOCKADE ARENA — WebSocket protocol (JSON text frames), version 1.3.0.
 // Kotlin port of the DEVELOPMENT.md message table + packages/core/src/types.ts.
 // The client sends inputs only; the server is authoritative and sends
 // snapshots/deltas. Parsing is manual JsonObject mapping (no polymorphic
 // serializer) so a single unknown field can never crash the client.
-// Turn-based (1.2.0): snapshots carry activePlayerId / turnNumber /
+// Turn-based (1.3.0): snapshots carry activePlayerId / turnNumber /
 // turnDeadlineMs, deltas carry a "turn" event, and acting off-turn is
 // rejected with error code NOT_YOUR_TURN. No cooldown fields any more.
-// Trophy mode + 4 players (1.2.0): snapshots carry mode / playerCount /
+// Trophy mode + 4 players (since 1.2.0): snapshots carry mode / playerCount /
 // trophy, the win reason "trophy" exists, and createRoom / queue carry
 // mode + playerCount; roomJoined / matchFound carry mode + playerCount.
+// NO POINTS SYSTEM (1.3.0): no `score` field anywhere — PlayerState carries
+// `blockadesLeft` (10 − blockades placed), there is no `score` delta, and
+// `result` carries no `scores`. Placing with no blocks left is rejected
+// with error code NO_BLOCKADES.
 
 import com.blokblok.arena.game.BlockadeState
 import com.blokblok.arena.game.DeltaEvent
@@ -19,6 +23,7 @@ import com.blokblok.arena.game.Edge
 import com.blokblok.arena.game.GameMode
 import com.blokblok.arena.game.LobbyPlayer
 import com.blokblok.arena.game.MatchStatus
+import com.blokblok.arena.game.MAX_BLOCKADES_PER_PLAYER
 import com.blokblok.arena.game.MoveAnim
 import com.blokblok.arena.game.Orientation
 import com.blokblok.arena.game.PlayerColor
@@ -84,7 +89,6 @@ sealed interface ServerMessage {
     data class Result(
         val winnerId: String?,
         val reason: WinReason,
-        val scores: Map<String, Int>,
         val stats: Map<String, PlayerStats>,
         val durationMs: Long,
     ) : ServerMessage
@@ -267,7 +271,9 @@ private fun parsePlayer(o: JsonObject): PlayerState = PlayerState(
     row = o.int("row"),
     col = o.int("col"),
     energy = o.int("energy"),
-    score = o.int("score"),
+    // blockadesLeft (10 − placed). -1 = field absent (pre-1.3.0 server);
+    // parseSnapshot fills it in from the blockade list in that case.
+    blockadesLeft = o.int("blockadesLeft", -1),
     progress = (o["progress"]?.jsonPrimitive?.content?.toFloatOrNull() ?: 0f),
     anim = parseMoveAnim(o.obj("anim")),
 )
@@ -293,6 +299,15 @@ private fun parseSnapshot(o: JsonObject): Snapshot {
     val players = o.arr("players")?.map { parsePlayer(it.jsonObject) } ?: emptyList()
     val mode = parseMode(o.str("mode"))
     val gridSize = o.int("gridSize", 12)
+    val blockades = o.arr("blockades")?.map { parseBlockade(it.jsonObject) } ?: emptyList()
+    // Backfill blockadesLeft for snapshots from a pre-1.3.0 server that did
+    // not send the field: blockades are permanent, so placed == active.
+    val playersFixed = players.map { p ->
+        if (p.blockadesLeft >= 0) p else p.copy(
+            blockadesLeft = (MAX_BLOCKADES_PER_PLAYER - blockades.count { it.playerId == p.id })
+                .coerceIn(0, MAX_BLOCKADES_PER_PLAYER),
+        )
+    }
     // Trophy cell: from the wire when present, else derived from the grid
     // size (centre cell) in trophy mode, null in race mode.
     val trophy = parseTrophy(o.obj("trophy"))
@@ -304,10 +319,10 @@ private fun parseSnapshot(o: JsonObject): Snapshot {
         gridSize = gridSize,
         durationSec = o.int("durationSec", 180),
         timeLeftMs = o.long("timeLeftMs"),
-        players = players,
-        blockades = o.arr("blockades")?.map { parseBlockade(it.jsonObject) } ?: emptyList(),
+        players = playersFixed,
+        blockades = blockades,
         winnerId = o.nullableStr("winnerId"),
-        // Turn-based (protocol 1.2.0). Fall back to P1 / turn 1 when the
+        // Turn-based (protocol 1.3.0). Fall back to P1 / turn 1 when the
         // server omits the fields (pre-1.1.0 snapshot).
         activePlayerId = o.str("activePlayerId").ifBlank { players.firstOrNull()?.id ?: "" },
         turnNumber = o.int("turnNumber", 1),
@@ -330,7 +345,6 @@ private fun parseDelta(e: JsonObject): DeltaEvent? {
         "blockade" -> e.obj("blockade")?.let { DeltaEvent.Blockade(parseBlockade(it)) }
         "energy" -> DeltaEvent.Energy(e.str("playerId"), e.int("energy"))
         "timer" -> DeltaEvent.Timer(e.long("timeLeftMs"))
-        "score" -> DeltaEvent.Score(e.str("playerId"), e.int("score"))
         "collide" -> DeltaEvent.Collide(e.str("playerId"), e.int("row"), e.int("col"), e.long("tick"))
         "win" -> DeltaEvent.Win(
             e.nullableStr("winnerId"),
@@ -398,8 +412,6 @@ fun parseServerMessage(text: String): ServerMessage? {
             root.arr("events")?.mapNotNull { parseDelta(it.jsonObject) } ?: emptyList(),
         )
         "result" -> {
-            val scores = HashMap<String, Int>()
-            root.obj("scores")?.forEach { (k, v) -> scores[k] = v.jsonPrimitive.intOrNull ?: 0 }
             val stats = HashMap<String, PlayerStats>()
             root.obj("stats")?.forEach { (k, v) ->
                 val o = v.jsonObject
@@ -408,7 +420,7 @@ fun parseServerMessage(text: String): ServerMessage? {
             ServerMessage.Result(
                 root.nullableStr("winnerId"),
                 parseWinReason(root.str("reason")),
-                scores, stats, root.long("durationMs"),
+                stats, root.long("durationMs"),
             )
         }
         "opponentLeft" -> ServerMessage.OpponentLeft(root.str("playerId"))

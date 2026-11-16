@@ -56,6 +56,7 @@ import com.blokblok.arena.data.ArenaSettings
 import com.blokblok.arena.game.BoardRenderer
 import com.blokblok.arena.game.Dir
 import com.blokblok.arena.game.Edge
+import com.blokblok.arena.game.MAX_BLOCKADES_PER_PLAYER
 import com.blokblok.arena.game.Orientation
 import com.blokblok.arena.game.Preview
 import com.blokblok.arena.game.Sfx
@@ -178,7 +179,7 @@ fun GameScreen(
     val activeIndex = snap?.players?.indexOfFirst { it.id == snap.activePlayerId } ?: -1
     val activeLabel = if (activeIndex >= 0) labelForSeat(activeIndex) else "P1"
 
-    // Turn state (protocol 1.2.0). Online / practice: only the active
+    // Turn state (protocol 1.3.0). Online / practice: only the active
     // player may act. Local 2P: either player acts on their own turn
     // (the engine rejects off-turn inputs); the board is never dimmed.
     val isLocal2P = kind == MatchKind.LOCAL_2P
@@ -195,18 +196,24 @@ fun GameScreen(
     val bannerColor = activePlayer?.let { playerColorCompose(it.color) } ?: NeonCyan
     // Drag-to-place acts for the active player in local 2P, else for me.
     val dragPlayerId = if (isLocal2P) activeId ?: myId else myId
+    // Blockades left for the player who would place (10 per match, hard
+    // cap). Quick-place is disabled at 0; the drag preview turns red via
+    // validateEdgeAgainstSnapshot returning NO_BLOCKADES.
+    val placePlayer = snap?.players?.find { it.id == dragPlayerId }
+    val placeBlockadesLeft = placePlayer?.blockadesLeft ?: MAX_BLOCKADES_PER_PLAYER
+    val canPlace = inputEnabled && placeBlockadesLeft > 0
 
     Column(
         modifier = Modifier.fillMaxSize().background(Color(0xFF0A0E14)),
     ) {
-        // HUD — scoreboard lists ALL players (2 or 4) with energy bars;
+        // HUD lists ALL players (2 or 4) with energy bars + blockades left;
         // the active player's row is highlighted.
         Hud(
             players = (snap?.players ?: emptyList()).mapIndexed { idx, p ->
                 PlayerHudEntry(
                     name = p.name,
-                    score = p.score,
                     energy = p.energy,
+                    blockadesLeft = p.blockadesLeft,
                     color = p.color,
                     label = labelForSeat(idx),
                     isActive = p.id == activeId,
@@ -216,7 +223,7 @@ fun GameScreen(
             connection = connection,
             latencyMs = null,
         )
-        // Turn banner + 30 s turn timer (protocol 1.2.0).
+        // Turn banner + 30 s turn timer (protocol 1.3.0).
         TurnBanner(label = turnLabel, turnNumber = turnNumber, activeColor = bannerColor)
         TurnTimerBar(turnDeadlineMs = snap?.turnDeadlineMs ?: 0L, nowMs = frameNowMs)
 
@@ -343,17 +350,21 @@ fun GameScreen(
                 Row {
                     Button(
                         onClick = { vm.placeAuto(Dir.UP, Orientation.H, 2) },
-                        enabled = inputEnabled,
+                        enabled = canPlace,
                         colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color(0xFF06202A)),
                     ) { Text("━ H", fontWeight = FontWeight.Bold) }
                     Spacer(Modifier.width(8.dp))
                     Button(
                         onClick = { vm.placeAuto(Dir.UP, Orientation.V, 2) },
-                        enabled = inputEnabled,
+                        enabled = canPlace,
                         colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color(0xFF06202A)),
                     ) { Text("┃ V", fontWeight = FontWeight.Bold) }
                 }
-                Text("auto-places in front of you", color = TextSecondary, fontSize = 10.sp)
+                if (placeBlockadesLeft <= 0) {
+                    Text("Blok habis", color = NeonRed, fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                } else {
+                    Text("auto-places in front of you", color = TextSecondary, fontSize = 10.sp)
+                }
             }
         }
 
