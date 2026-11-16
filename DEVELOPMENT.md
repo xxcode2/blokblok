@@ -142,6 +142,22 @@ npm run dev --workspace=@blockade/web       # web on http://localhost:5173
     wall-clock entry point owns the name `tick`).
 - Server: authoritative 20-tick sim, rooms by 6-char code, 1v1 matchmaking queue,
   reconnect tokens, snapshots + deltas, match results (in-memory).
+  - Verified 2026-11-16 (Track 1, live server on :3001):
+    `apps/server/scripts/smoke-test.mjs` PASSED — scripted 1v1: hello, ping/pong,
+    createRoom (6-char code), joinRoom, ready, start, countdown 3s, matchStart,
+    valid place → blockade delta, overlapping place → `INVALID_BLOCKADE`, P1
+    walks to the goal row → `result` winner P1, reason `goal`, score 452.
+    Smoothness: 67 delta/state broadcasts, mean gap 48.0 ms, max 52 ms,
+    0 stalls (>250 ms); server tick processing avg 0.44 ms, max 3.34 ms
+    (20/s budget is 50 ms). `queue-test.mjs` PASSED (queue → matchFound same
+    room code → auto matchStart). `reconnect-test.mjs` PASSED (drop mid-match
+    → reconnect with token → `reconnected` with live snapshot; bad token →
+    `BAD_TOKEN`). One bug found + fixed during verification: `reconnect` was
+    rejected by the hello-gate because it arrives as the first message on a
+    fresh socket — it now authenticates via token before the gate.
+  - Rate limiting: max 30 inputs/sec per player (drop + `BAD_REQUEST`).
+    Matchmade rooms auto-ready both players and auto-start 500 ms after
+    `matchFound`. Results + tick stats on GET /stats; GET /health for liveness.
 - Web: menu, lobby, online 1v1, practice vs AI, local 2P, Canvas renderer,
   keyboard/mouse + touch controls, HUD, results screen.
   - Animation (user quality bar): a single requestAnimationFrame loop drives
