@@ -36,15 +36,37 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.blokblok.arena.game.Dir
+import com.blokblok.arena.game.PlayerColor
 import com.blokblok.arena.game.TURN_DURATION_MS
 import com.blokblok.arena.game.joystickDir
 import com.blokblok.arena.ui.ConnectionState
+import com.blokblok.arena.ui.theme.NeonAmber
 import com.blokblok.arena.ui.theme.NeonBlue
 import com.blokblok.arena.ui.theme.NeonCyan
 import com.blokblok.arena.ui.theme.NeonRed
+import com.blokblok.arena.ui.theme.PlayerGreen
 import com.blokblok.arena.ui.theme.TextPrimary
 import com.blokblok.arena.ui.theme.TextSecondary
 import kotlin.math.sqrt
+
+/** Compose colour for a player colour (P1 blue, P2 red, P3 green #22c55e,
+ *  P4 amber #f59e0b). */
+fun playerColorCompose(color: PlayerColor): Color = when (color) {
+    PlayerColor.BLUE -> NeonBlue
+    PlayerColor.RED -> NeonRed
+    PlayerColor.GREEN -> PlayerGreen
+    PlayerColor.AMBER -> NeonAmber
+}
+
+/** One scoreboard row: name, score, energy, colour, seat label, active-turn flag. */
+data class PlayerHudEntry(
+    val name: String,
+    val score: Int,
+    val energy: Int,
+    val color: PlayerColor,
+    val label: String,
+    val isActive: Boolean = false,
+)
 
 @Composable
 fun ConnectionDot(state: ConnectionState, latencyMs: Long?) {
@@ -68,14 +90,7 @@ fun ConnectionDot(state: ConnectionState, latencyMs: Long?) {
 
 @Composable
 fun Hud(
-    myName: String,
-    myScore: Int,
-    myEnergy: Int,
-    myColor: Color,
-    oppName: String,
-    oppScore: Int,
-    oppEnergy: Int,
-    oppColor: Color,
+    players: List<PlayerHudEntry>,
     timeLeftMs: Long,
     connection: ConnectionState,
     latencyMs: Long?,
@@ -87,23 +102,36 @@ fun Hud(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Player 1 (me)
-            Column(modifier = Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(12.dp).clip(CircleShape).background(myColor))
-                    Spacer(Modifier.width(6.dp))
-                    Text(myName, color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                    Spacer(Modifier.width(8.dp))
-                    Text("$myScore", color = myColor, fontWeight = FontWeight.Bold, fontSize = 18.sp)
+            // Scoreboard: one compact column per player (2 or 4).
+            Row(modifier = Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                for (entry in players) {
+                    val color = playerColorCompose(entry.color)
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier.size(12.dp).clip(CircleShape)
+                                    .background(color),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                "${entry.label} ${entry.name}",
+                                color = if (entry.isActive) TextPrimary else TextSecondary,
+                                fontWeight = if (entry.isActive) FontWeight.Bold else FontWeight.Normal,
+                                fontSize = 13.sp,
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text("${entry.score}", color = color, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        }
+                        Spacer(Modifier.height(4.dp))
+                        LinearProgressIndicator(
+                            progress = { entry.energy / 100f },
+                            modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
+                            color = color,
+                            trackColor = Color(0xFF1E293B),
+                        )
+                        Text("Energy ${entry.energy}", color = TextSecondary, fontSize = 11.sp)
+                    }
                 }
-                Spacer(Modifier.height(4.dp))
-                LinearProgressIndicator(
-                    progress = { myEnergy / 100f },
-                    modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
-                    color = myColor,
-                    trackColor = Color(0xFF1E293B),
-                )
-                Text("Energy $myEnergy", color = TextSecondary, fontSize = 11.sp)
             }
             // Timer
             Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.padding(horizontal = 12.dp)) {
@@ -116,31 +144,13 @@ fun Hud(
                 )
                 ConnectionDot(connection, latencyMs)
             }
-            // Player 2 (opponent)
-            Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("$oppScore", color = oppColor, fontWeight = FontWeight.Bold, fontSize = 18.sp)
-                    Spacer(Modifier.width(8.dp))
-                    Text(oppName, color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 15.sp)
-                    Spacer(Modifier.width(6.dp))
-                    Box(Modifier.size(12.dp).clip(CircleShape).background(oppColor))
-                }
-                Spacer(Modifier.height(4.dp))
-                LinearProgressIndicator(
-                    progress = { oppEnergy / 100f },
-                    modifier = Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp)),
-                    color = oppColor,
-                    trackColor = Color(0xFF1E293B),
-                )
-                Text("Energy $oppEnergy", color = TextSecondary, fontSize = 11.sp)
-            }
         }
     }
 }
 
 /** Turn banner (protocol 1.1.0): whose turn it is + the turn number.
- *  [label] is e.g. "Giliran kamu", "Giliran lawan", or "Giliran P1"/"Giliran P2"
- *  in local 2P; [activeColor] is the active player's orb colour. */
+ *  [label] is e.g. "Giliran kamu", "Giliran lawan", or "Giliran P1".."Giliran P4"
+ *  in local modes; [activeColor] is the active player's orb colour. */
 @Composable
 fun TurnBanner(
     label: String,

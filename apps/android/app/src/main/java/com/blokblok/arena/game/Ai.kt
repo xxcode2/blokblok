@@ -3,9 +3,12 @@ package com.blokblok.arena.game
 // BLOCKADE ARENA — AI opponents (practice mode).
 // Kotlin port of packages/core/src/ai.ts. AI uses only legal actions through
 // the public engine API — same rules as humans.
-// TURN-BASED (protocol 1.1.0): the AI picks a SINGLE move-or-blockade action
+// TURN-BASED (protocol 1.2.0): the AI picks a SINGLE move-or-blockade action
 // per turn (one call per AI turn, enforced by the caller + the turn guard
 // in chooseAiAction); the engine then passes the turn.
+// TROPHY mode: the AI targets the trophy cell (shortest path — the engine's
+// nextStepTowardGoal / shortestPathLength are target-aware) and, with 3
+// opponents, blocks the one closest to the trophy.
 // Difficulties: Easy / Normal / Hard (no Expert in milestone 1).
 
 enum class AiDifficulty { EASY, NORMAL, HARD }
@@ -73,7 +76,11 @@ fun chooseAiAction(engine: GameEngine, playerId: String, difficulty: AiDifficult
     val snap = engine.snapshot()
     if (snap.status != MatchStatus.PLAYING) return null
     if (snap.activePlayerId.isNotBlank() && snap.activePlayerId != playerId) return null
-    val foe = snap.players.find { it.id != playerId } ?: return null
+    // Block the most dangerous opponent: the one closest to the target
+    // (goal row in race, trophy cell in trophy). In 2P this is the only foe.
+    val foes = snap.players.filter { it.id != playerId }
+    if (foes.isEmpty()) return null
+    val foe = foes.minByOrNull { engine.shortestPathLength(it.id) ?: Int.MAX_VALUE } ?: return null
     val me = engine.getPlayer(playerId) ?: return null
     val legal = engine.legalMoves(playerId)
     val step = engine.nextStepTowardGoal(playerId)

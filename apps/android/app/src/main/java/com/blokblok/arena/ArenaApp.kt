@@ -35,6 +35,7 @@ import com.blokblok.arena.data.ArenaDatabase
 import com.blokblok.arena.data.ArenaSettings
 import com.blokblok.arena.data.MatchRecord
 import com.blokblok.arena.data.SettingsStore
+import com.blokblok.arena.game.GameMode
 import com.blokblok.arena.game.SoundEngine
 import com.blokblok.arena.ui.GameViewModel
 import com.blokblok.arena.ui.MatchConfig
@@ -64,6 +65,9 @@ fun ArenaApp(gameViewModel: GameViewModel) {
     var pendingConfig by remember { mutableStateOf<MatchConfig?>(null) }
     var showPrivateDialog by remember { mutableStateOf(false) }
     var joinCode by remember { mutableStateOf("") }
+    // Mode / player count picked in the menu when "Private Room" was tapped.
+    var privateMode by remember { mutableStateOf(GameMode.RACE) }
+    var privatePlayerCount by remember { mutableStateOf(2) }
 
     // Save finished matches to history (once per result).
     val result by gameViewModel.result.collectAsState()
@@ -104,13 +108,23 @@ fun ArenaApp(gameViewModel: GameViewModel) {
         composable(Route.Menu.path) {
             MenuScreen(
                 settings = settings,
-                onPlayOnline = {
-                    pendingConfig = MatchConfig(MatchKind.ONLINE_QUEUE, gridSize = settings.gridSize, durationSec = settings.durationSec)
+                onPlayOnline = { mode, playerCount ->
+                    pendingConfig = MatchConfig(
+                        MatchKind.ONLINE_QUEUE, gridSize = settings.gridSize,
+                        durationSec = settings.durationSec, mode = mode, playerCount = playerCount,
+                    )
                     navController.navigate(Route.Lobby.build("queue"))
                 },
-                onPrivateRoom = { showPrivateDialog = true },
-                onPractice = { difficulty ->
-                    pendingConfig = MatchConfig(MatchKind.PRACTICE, difficulty = difficulty, gridSize = settings.gridSize, durationSec = settings.durationSec)
+                onPrivateRoom = { mode, playerCount ->
+                    privateMode = mode
+                    privatePlayerCount = playerCount
+                    showPrivateDialog = true
+                },
+                onPractice = { difficulty, mode, playerCount ->
+                    pendingConfig = MatchConfig(
+                        MatchKind.PRACTICE, difficulty = difficulty, gridSize = settings.gridSize,
+                        durationSec = settings.durationSec, mode = mode, playerCount = playerCount,
+                    )
                     navController.navigate(Route.Game.path)
                 },
                 onLocal2P = {
@@ -236,6 +250,8 @@ fun ArenaApp(gameViewModel: GameViewModel) {
                         gridSize = settings.gridSize,
                         durationSec = settings.durationSec,
                         roomCode = joinCode.ifBlank { null },
+                        mode = privateMode,
+                        playerCount = privatePlayerCount,
                     )
                     showPrivateDialog = false
                     joinCode = ""

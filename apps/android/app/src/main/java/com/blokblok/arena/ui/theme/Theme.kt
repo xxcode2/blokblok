@@ -16,6 +16,9 @@ val NeonCyan = Color(0xFF22D3EE)
 val NeonBlue = Color(0xFF38BDF8)
 val NeonRed = Color(0xFFF43F5E)
 val NeonGreen = Color(0xFF22FF88)
+/** Player 3 (trophy 4P): green #22c55e. Player 4: amber #f59e0b. */
+val PlayerGreen = Color(0xFF22C55E)
+val NeonAmber = Color(0xFFF59E0B)
 val TextPrimary = Color(0xFFE2E8F0)
 val TextSecondary = Color(0xFF94A3B8)
 

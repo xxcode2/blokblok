@@ -59,9 +59,10 @@ fun ResultsScreen(
     }
     val reasonText = when (result?.reason) {
         WinReason.GOAL -> "${winner?.name ?: "Winner"} reached the goal row"
-        WinReason.TIMEOUT -> "Time ran out — closest to the goal wins"
+        WinReason.TROPHY -> "${winner?.name ?: "Winner"} captured the trophy"
+        WinReason.TIMEOUT -> "Time ran out — closest to the target wins"
         WinReason.FORFEIT -> "Opponent left the match"
-        WinReason.DRAW -> "Nobody reached the goal in time"
+        WinReason.DRAW -> "Nobody reached the target in time"
         null -> ""
     }
 

@@ -70,6 +70,29 @@ private val RED = OrbPalette(
     glow = Color(0xFFF43F5E),
     dark = Color(0xFF9F1239),
 )
+private val GREEN = OrbPalette(
+    core = Color(0xFF86EFAC),
+    mid = Color(0xFF22C55E),
+    glow = Color(0xFF16A34A),
+    dark = Color(0xFF14532D),
+)
+private val AMBER = OrbPalette(
+    core = Color(0xFFFDE68A),
+    mid = Color(0xFFF59E0B),
+    glow = Color(0xFFD97706),
+    dark = Color(0xFF78350F),
+)
+
+/** Orb palette for a player colour (P1 blue, P2 red, P3 green, P4 amber). */
+private fun paletteFor(color: PlayerColor): OrbPalette = when (color) {
+    PlayerColor.BLUE -> BLUE
+    PlayerColor.RED -> RED
+    PlayerColor.GREEN -> GREEN
+    PlayerColor.AMBER -> AMBER
+}
+
+private val GOLD = Color(0xFFFFD700)
+private val GOLD_DEEP = Color(0xFFF59E0B)
 
 class BoardRenderer {
     private var bg: ImageBitmap? = null
@@ -153,6 +176,8 @@ class BoardRenderer {
         // Orb sprites (once per colour).
         sprites[PlayerColor.BLUE] = makeOrbSprite(BLUE)
         sprites[PlayerColor.RED] = makeOrbSprite(RED)
+        sprites[PlayerColor.GREEN] = makeOrbSprite(GREEN)
+        sprites[PlayerColor.AMBER] = makeOrbSprite(AMBER)
     }
 
     private fun makeOrbSprite(pal: OrbPalette): ImageBitmap {
@@ -257,9 +282,16 @@ class BoardRenderer {
             val w = snap.players.find { it.id == snap.winnerId }
             if (w != null) {
                 val c = cellCenter(w.row.toFloat(), w.col.toFloat())
-                val pal = if (w.color == PlayerColor.BLUE) BLUE else RED
+                val pal = paletteFor(w.color)
                 burst(c.x, c.y, pal.glow, 60)
                 burst(c.x, c.y, Color.White, 30)
+                if (snap.mode == GameMode.TROPHY) {
+                    // Trophy capture: gold burst at the trophy cell itself.
+                    val t = snap.trophy ?: trophyCellFor(snap.gridSize)
+                    val tc = cellCenter(t.row.toFloat(), t.col.toFloat())
+                    burst(tc.x, tc.y, GOLD, 80)
+                    burst(tc.x, tc.y, Color.White, 40)
+                }
             }
         }
         prevSnap = snap
@@ -336,13 +368,21 @@ class BoardRenderer {
             withTransform({ translate(shakeDx, shakeDy) }) {
                 bg?.let { drawImage(it, dstSize = Size(s, s)) }
 
-                // Goal-row pulse.
-                val pulse = 0.05f + 0.04f * sin(nowMs / 450f)
-                drawRect(Color(0xFF22D3EE).copy(alpha = pulse), Offset(originX, originY), Size(cell * n, cell))
-                drawRect(
-                    Color(0xFFF43F5E).copy(alpha = pulse),
-                    Offset(originX, originY + cell * (n - 1)), Size(cell * n, cell),
-                )
+                // Goal-row pulse (race mode only — trophy mode has no goal rows).
+                if (snap.mode == GameMode.RACE) {
+                    val pulse = 0.05f + 0.04f * sin(nowMs / 450f)
+                    drawRect(Color(0xFF22D3EE).copy(alpha = pulse), Offset(originX, originY), Size(cell * n, cell))
+                    drawRect(
+                        Color(0xFFF43F5E).copy(alpha = pulse),
+                        Offset(originX, originY + cell * (n - 1)), Size(cell * n, cell),
+                    )
+                }
+
+                // Trophy (trophy mode): gold trophy at the centre cell.
+                if (snap.mode == GameMode.TROPHY) {
+                    val t = snap.trophy ?: trophyCellFor(snap.gridSize)
+                    drawTrophy(t, nowMs)
+                }
 
                 // Blockades (grow-in + glow pulse).
                 for (b in snap.blockades) {
@@ -393,7 +433,7 @@ class BoardRenderer {
     private fun DrawScope.drawTrail(p: PlayerState, @Suppress("UNUSED_PARAMETER") pos: Pair<Float, Float>) {
         val t = trails[p.id] ?: return
         if (t.size < 2) return
-        val pal = if (p.color == PlayerColor.BLUE) BLUE else RED
+        val pal = paletteFor(p.color)
         for (i in 0 until t.size - 1) {
             val a = (i.toFloat() / t.size) * 0.28f
             val c = cellCenter(t[i].first, t[i].second)
@@ -403,7 +443,7 @@ class BoardRenderer {
 
     private fun DrawScope.drawOrb(p: PlayerState, pos: Pair<Float, Float>, nowMs: Long) {
         val c = cellCenter(pos.first, pos.second)
-        val pal = if (p.color == PlayerColor.BLUE) BLUE else RED
+        val pal = paletteFor(p.color)
         val pulse = 1f + 0.05f * sin(nowMs / 280f + if (p.color == PlayerColor.BLUE) 0f else PI.toFloat())
         val r = cell * 0.52f * pulse
         val moving = glides.containsKey(p.id)
@@ -452,6 +492,87 @@ class BoardRenderer {
             }
             drawPath(tri, pal.core)
         }
+    }
+
+    /** Gold trophy at the centre cell (trophy mode, canvas-drawn — no image
+     *  assets). Halo glow + idle pulse (the cup breathes) + orbiting
+     *  sparkle stars + an occasional gold particle; the win burst on
+     *  capture is fired from setSnapshot. */
+    private fun DrawScope.drawTrophy(trophy: TrophyCell, nowMs: Long) {
+        val c = cellCenter(trophy.row.toFloat(), trophy.col.toFloat())
+        val pulse = 1f + 0.06f * sin(nowMs / 400f)
+        val r = cell * 0.42f * pulse
+        // Halo glow (breathes with the same pulse).
+        drawCircle(GOLD.copy(alpha = 0.16f + 0.06f * sin(nowMs / 400f)), r * 1.45f, c)
+        drawCircle(GOLD_DEEP.copy(alpha = 0.22f), r * 1.15f, c)
+        // Cup bowl.
+        val bowl = androidx.compose.ui.graphics.Path().apply {
+            moveTo(c.x - r * 0.62f, c.y - r * 0.55f)
+            lineTo(c.x + r * 0.62f, c.y - r * 0.55f)
+            cubicTo(c.x + r * 0.55f, c.y + r * 0.05f, c.x + r * 0.35f, c.y + r * 0.35f, c.x + r * 0.14f, c.y + r * 0.38f)
+            lineTo(c.x - r * 0.14f, c.y + r * 0.38f)
+            cubicTo(c.x - r * 0.35f, c.y + r * 0.35f, c.x - r * 0.55f, c.y + r * 0.05f, c.x - r * 0.62f, c.y - r * 0.55f)
+            close()
+        }
+        drawPath(bowl, GOLD)
+        // Rim highlight.
+        drawLine(
+            Color.White.copy(alpha = 0.85f),
+            Offset(c.x - r * 0.55f, c.y - r * 0.52f), Offset(c.x + r * 0.55f, c.y - r * 0.52f),
+            strokeWidth = max(2f, cell * 0.05f),
+            cap = androidx.compose.ui.graphics.StrokeCap.Round,
+        )
+        // Handles (arcs on both sides of the bowl).
+        drawArc(
+            GOLD_DEEP, startAngle = -90f, sweepAngle = 180f, useCenter = false,
+            topLeft = Offset(c.x + r * 0.42f, c.y - r * 0.45f), size = Size(r * 0.55f, r * 0.6f),
+            style = Stroke(width = max(2f, cell * 0.06f)),
+        )
+        drawArc(
+            GOLD_DEEP, startAngle = 90f, sweepAngle = 180f, useCenter = false,
+            topLeft = Offset(c.x - r * 0.97f, c.y - r * 0.45f), size = Size(r * 0.55f, r * 0.6f),
+            style = Stroke(width = max(2f, cell * 0.06f)),
+        )
+        // Stem + base.
+        drawLine(
+            GOLD_DEEP, Offset(c.x, c.y + r * 0.38f), Offset(c.x, c.y + r * 0.62f),
+            strokeWidth = max(2f, cell * 0.07f),
+            cap = androidx.compose.ui.graphics.StrokeCap.Round,
+        )
+        drawLine(
+            GOLD, Offset(c.x - r * 0.38f, c.y + r * 0.68f), Offset(c.x + r * 0.38f, c.y + r * 0.68f),
+            strokeWidth = max(2.5f, cell * 0.09f),
+            cap = androidx.compose.ui.graphics.StrokeCap.Round,
+        )
+        // Star on the bowl.
+        drawStar(c.x, c.y - r * 0.12f, r * 0.16f, Color.White.copy(alpha = 0.95f))
+        // Sparkles: 4-point stars orbiting the trophy, alpha pulsing.
+        for (i in 0 until 5) {
+            val ang = nowMs / 900f + i * (2f * PI.toFloat() / 5f)
+            val dist = r * (1.05f + 0.15f * sin(nowMs / 500f + i * 1.7f))
+            val sx = c.x + cos(ang) * dist
+            val sy = c.y + sin(ang) * dist * 0.9f
+            val a = 0.35f + 0.45f * (0.5f + 0.5f * sin(nowMs / 300f + i * 2.1f))
+            drawStar(sx, sy, cell * 0.07f, Color.White.copy(alpha = a))
+        }
+        // Occasional gold sparkle particle (fixed pool, no allocation).
+        if (Random.nextFloat() < 0.25f) {
+            burst(c.x + (Random.nextFloat() - 0.5f) * r, c.y + (Random.nextFloat() - 0.5f) * r, GOLD, 1)
+        }
+    }
+
+    /** 4-point star (two crossed lines) centred at (x, y). */
+    private fun DrawScope.drawStar(x: Float, y: Float, half: Float, color: Color) {
+        drawLine(
+            color, Offset(x - half, y), Offset(x + half, y),
+            strokeWidth = max(1.5f, half * 0.35f),
+            cap = androidx.compose.ui.graphics.StrokeCap.Round,
+        )
+        drawLine(
+            color, Offset(x, y - half), Offset(x, y + half),
+            strokeWidth = max(1.5f, half * 0.35f),
+            cap = androidx.compose.ui.graphics.StrokeCap.Round,
+        )
     }
 
     private fun DrawScope.drawEdge(e: Edge, prog: Float, glowPulse: Float) {

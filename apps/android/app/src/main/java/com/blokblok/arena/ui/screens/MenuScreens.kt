@@ -47,6 +47,7 @@ import androidx.compose.ui.unit.sp
 import com.blokblok.arena.data.ArenaSettings
 import com.blokblok.arena.data.SettingsStore
 import com.blokblok.arena.game.AiDifficulty
+import com.blokblok.arena.game.GameMode
 import com.blokblok.arena.ui.GameViewModel
 import com.blokblok.arena.ui.MatchKind
 import com.blokblok.arena.ui.theme.GraphiteCard
@@ -88,13 +89,18 @@ fun SplashScreen(onDone: () -> Unit) {
 @Composable
 fun MenuScreen(
     settings: ArenaSettings,
-    onPlayOnline: () -> Unit,
-    onPrivateRoom: () -> Unit,
-    onPractice: (AiDifficulty) -> Unit,
+    onPlayOnline: (GameMode, Int) -> Unit,
+    onPrivateRoom: (GameMode, Int) -> Unit,
+    onPractice: (AiDifficulty, GameMode, Int) -> Unit,
     onLocal2P: () -> Unit,
     onSettings: () -> Unit,
 ) {
     var showPracticePicker by remember { mutableStateOf(false) }
+    // Mode picker (protocol 1.2.0): Race to the Top (2P) or Rebut Piala
+    // (trophy, 2P or 4P). Player count is locked to 2 in race mode.
+    var selectedMode by remember { mutableStateOf(GameMode.RACE) }
+    var selectedPlayerCount by remember { mutableStateOf(2) }
+    val playerCount = if (selectedMode == GameMode.RACE) 2 else selectedPlayerCount
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -106,11 +112,66 @@ fun MenuScreen(
     ) {
         Text("BLOCKADE ARENA", color = NeonCyan, fontSize = 30.sp, fontWeight = FontWeight.Black)
         Text("Signed in as ${settings.playerName}", color = TextSecondary, fontSize = 13.sp)
-        Spacer(Modifier.height(28.dp))
+        Spacer(Modifier.height(20.dp))
 
-        MenuButton("Play Online", "Quick match vs a random opponent", NeonCyan) { onPlayOnline() }
+        // Mode picker.
+        Card(
+            modifier = Modifier.fillMaxWidth(0.85f),
+            colors = CardDefaults.cardColors(containerColor = GraphiteCard),
+        ) {
+            Column(Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("Mode permainan", color = TextPrimary, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ModePickButton(
+                        label = "Race to the Top",
+                        selected = selectedMode == GameMode.RACE,
+                        onClick = { selectedMode = GameMode.RACE },
+                    )
+                    ModePickButton(
+                        label = "Rebut Piala",
+                        selected = selectedMode == GameMode.TROPHY,
+                        onClick = { selectedMode = GameMode.TROPHY },
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                Text("Jumlah pemain", color = TextPrimary, fontWeight = FontWeight.Bold)
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    ModePickButton(
+                        label = "2 pemain",
+                        selected = playerCount == 2,
+                        onClick = { selectedPlayerCount = 2 },
+                    )
+                    ModePickButton(
+                        label = "4 pemain",
+                        selected = playerCount == 4,
+                        enabled = selectedMode == GameMode.TROPHY,
+                        onClick = { selectedPlayerCount = 4 },
+                    )
+                }
+                if (selectedMode == GameMode.RACE) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Race to the Top selalu 2 pemain — pilih Rebut Piala untuk 4 pemain.",
+                        color = TextSecondary, fontSize = 12.sp,
+                    )
+                } else {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Rebut Piala: rebut piala emas di tengah papan. " +
+                            if (playerCount == 4) "4 pemain: P1 biru, P2 merah, P3 hijau, P4 kuning."
+                            else "2 pemain: P1 biru vs P2 merah.",
+                        color = TextSecondary, fontSize = 12.sp,
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(20.dp))
+
+        MenuButton("Play Online", "Quick match vs a random opponent", NeonCyan) { onPlayOnline(selectedMode, playerCount) }
         Spacer(Modifier.height(12.dp))
-        MenuButton("Private Room", "Create or join with a room code", NeonBlue) { onPrivateRoom() }
+        MenuButton("Private Room", "Create or join with a room code", NeonBlue) { onPrivateRoom(selectedMode, playerCount) }
         Spacer(Modifier.height(12.dp))
         MenuButton("Practice vs AI", "Offline — Easy / Normal / Hard", NeonBlue) { showPracticePicker = true }
         Spacer(Modifier.height(12.dp))
@@ -128,11 +189,18 @@ fun MenuScreen(
             ) {
                 Column(Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("Choose AI difficulty", color = TextPrimary, fontWeight = FontWeight.Bold)
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        if (playerCount == 4) "Kamu vs 3 AI (Rebut Piala, 4 pemain)"
+                        else if (selectedMode == GameMode.TROPHY) "Kamu vs 1 AI (Rebut Piala)"
+                        else "Kamu vs 1 AI (Race to the Top)",
+                        color = TextSecondary, fontSize = 12.sp,
+                    )
                     Spacer(Modifier.height(12.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         for (d in AiDifficulty.entries) {
                             Button(
-                                onClick = { onPractice(d) },
+                                onClick = { onPractice(d, selectedMode, playerCount) },
                                 colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color(0xFF06202A)),
                             ) { Text(d.name) }
                         }
@@ -144,6 +212,25 @@ fun MenuScreen(
         Spacer(Modifier.height(28.dp))
         Text("v1.0.0 · Free & open source", color = TextSecondary, fontSize = 11.sp)
     }
+}
+
+@Composable
+private fun ModePickButton(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+) {
+    Button(
+        onClick = onClick,
+        enabled = enabled,
+        colors = ButtonDefaults.buttonColors(
+            containerColor = if (selected) NeonCyan else GraphiteCard,
+            contentColor = if (selected) Color(0xFF06202A) else TextPrimary,
+            disabledContainerColor = GraphiteCard,
+            disabledContentColor = TextSecondary,
+        ),
+    ) { Text(label, fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal) }
 }
 
 @Composable
@@ -270,10 +357,13 @@ fun LobbyScreen(
     val queuePos by vm.queuePosition.collectAsState()
     val countdown by vm.countdown.collectAsState()
     val roomCode by vm.roomCode.collectAsState()
+    val roomPlayerCount by vm.roomPlayerCount.collectAsState()
     val myId by vm.myId.collectAsState()
     val error by vm.error.collectAsState()
     val snapshot by vm.snapshot.collectAsState()
     val clipboard = LocalClipboardManager.current
+    /** Players the room needs before the host may start (2, or 4 in trophy). */
+    val expectedPlayers = roomPlayerCount ?: 2
 
     LaunchedEffect(snapshot) {
         if (snapshot != null) onMatchStart()
@@ -333,8 +423,8 @@ fun LobbyScreen(
             }
         }
 
-        if (players.size < 2) {
-            Text("Waiting for an opponent to join…", color = TextSecondary, fontSize = 13.sp)
+        if (players.size < expectedPlayers) {
+            Text("Waiting for ${expectedPlayers - players.size} more player(s) to join…", color = TextSecondary, fontSize = 13.sp)
         }
 
         Spacer(Modifier.height(20.dp))
@@ -344,7 +434,7 @@ fun LobbyScreen(
                 Text(if (me.ready) "Cancel ready" else "I'm ready", color = TextPrimary)
             }
             Spacer(Modifier.height(8.dp))
-            if (me.isHost && players.size >= 2 && players.all { it.ready }) {
+            if (me.isHost && players.size >= expectedPlayers && players.all { it.ready }) {
                 Button(
                     onClick = { vm.startOnlineMatch() },
                     modifier = Modifier.fillMaxWidth(0.85f),

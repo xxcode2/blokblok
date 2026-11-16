@@ -57,21 +57,22 @@ import com.blokblok.arena.game.BoardRenderer
 import com.blokblok.arena.game.Dir
 import com.blokblok.arena.game.Edge
 import com.blokblok.arena.game.Orientation
-import com.blokblok.arena.game.PlayerColor
 import com.blokblok.arena.game.Preview
 import com.blokblok.arena.game.Sfx
 import com.blokblok.arena.game.SoundEngine
 import com.blokblok.arena.game.extendEdge
 import com.blokblok.arena.game.pickEdge
+import com.blokblok.arena.game.labelForSeat
 import com.blokblok.arena.game.swipeDir
 import com.blokblok.arena.game.validateEdgeAgainstSnapshot
 import com.blokblok.arena.ui.GameViewModel
 import com.blokblok.arena.ui.MatchKind
 import com.blokblok.arena.ui.components.Hud
 import com.blokblok.arena.ui.components.Joystick
+import com.blokblok.arena.ui.components.PlayerHudEntry
 import com.blokblok.arena.ui.components.TurnBanner
 import com.blokblok.arena.ui.components.TurnTimerBar
-import com.blokblok.arena.ui.theme.NeonBlue
+import com.blokblok.arena.ui.components.playerColorCompose
 import com.blokblok.arena.ui.theme.NeonCyan
 import com.blokblok.arena.ui.theme.NeonRed
 import com.blokblok.arena.ui.theme.TextSecondary
@@ -172,12 +173,12 @@ fun GameScreen(
     var swipeStart by remember { mutableStateOf(Offset.Zero) }
     var swipeAccum by remember { mutableStateOf(Offset.Zero) }
 
-    val me = snap?.players?.find { it.id == myId }
     val foe = snap?.players?.find { it.id != myId }
-    val myColor = if (me?.color == PlayerColor.RED) NeonRed else NeonBlue
-    val foeColor = if (foe?.color == PlayerColor.RED) NeonRed else NeonBlue
+    // Seat label of the active player ("P1".."P4") for the turn banner.
+    val activeIndex = snap?.players?.indexOfFirst { it.id == snap.activePlayerId } ?: -1
+    val activeLabel = if (activeIndex >= 0) labelForSeat(activeIndex) else "P1"
 
-    // Turn state (protocol 1.1.0). Online / practice: only the active
+    // Turn state (protocol 1.2.0). Online / practice: only the active
     // player may act. Local 2P: either player acts on their own turn
     // (the engine rejects off-turn inputs); the board is never dimmed.
     val isLocal2P = kind == MatchKind.LOCAL_2P
@@ -187,36 +188,35 @@ fun GameScreen(
     val activePlayer = snap?.players?.find { it.id == activeId }
     val turnLabel = when {
         snap == null -> "Menunggu giliran"
-        isLocal2P -> if (activePlayer?.color == PlayerColor.RED) "Giliran P2" else "Giliran P1"
+        isLocal2P -> "Giliran $activeLabel"
         activeId == myId -> "Giliran kamu"
-        else -> "Giliran lawan"
+        else -> "Giliran $activeLabel"
     }
-    val bannerColor = when (activePlayer?.color) {
-        PlayerColor.RED -> NeonRed
-        PlayerColor.BLUE -> NeonBlue
-        null -> NeonCyan
-    }
+    val bannerColor = activePlayer?.let { playerColorCompose(it.color) } ?: NeonCyan
     // Drag-to-place acts for the active player in local 2P, else for me.
     val dragPlayerId = if (isLocal2P) activeId ?: myId else myId
 
     Column(
         modifier = Modifier.fillMaxSize().background(Color(0xFF0A0E14)),
     ) {
-        // HUD
+        // HUD — scoreboard lists ALL players (2 or 4) with energy bars;
+        // the active player's row is highlighted.
         Hud(
-            myName = me?.name ?: settings.playerName,
-            myScore = me?.score ?: 0,
-            myEnergy = me?.energy ?: 100,
-            myColor = myColor,
-            oppName = foe?.name ?: "Opponent",
-            oppScore = foe?.score ?: 0,
-            oppEnergy = foe?.energy ?: 100,
-            oppColor = foeColor,
+            players = (snap?.players ?: emptyList()).mapIndexed { idx, p ->
+                PlayerHudEntry(
+                    name = p.name,
+                    score = p.score,
+                    energy = p.energy,
+                    color = p.color,
+                    label = labelForSeat(idx),
+                    isActive = p.id == activeId,
+                )
+            },
             timeLeftMs = snap?.timeLeftMs ?: 0,
             connection = connection,
             latencyMs = null,
         )
-        // Turn banner + 30 s turn timer (protocol 1.1.0).
+        // Turn banner + 30 s turn timer (protocol 1.2.0).
         TurnBanner(label = turnLabel, turnNumber = turnNumber, activeColor = bannerColor)
         TurnTimerBar(turnDeadlineMs = snap?.turnDeadlineMs ?: 0L, nowMs = frameNowMs)
 

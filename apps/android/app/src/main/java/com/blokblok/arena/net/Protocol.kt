@@ -1,6 +1,6 @@
 package com.blokblok.arena.net
 
-// BLOCKADE ARENA — WebSocket protocol (JSON text frames), version 1.1.0.
+// BLOCKADE ARENA — WebSocket protocol (JSON text frames), version 1.2.0.
 // Kotlin port of the DEVELOPMENT.md message table + packages/core/src/types.ts.
 // The client sends inputs only; the server is authoritative and sends
 // snapshots/deltas. Parsing is manual JsonObject mapping (no polymorphic
@@ -8,6 +8,9 @@ package com.blokblok.arena.net
 // Turn-based (1.1.0): snapshots carry activePlayerId / turnNumber /
 // turnDeadlineMs, deltas carry a "turn" event, and acting off-turn is
 // rejected with error code NOT_YOUR_TURN. No cooldown fields any more.
+// Trophy mode + 4 players (1.2.0): snapshots carry mode / playerCount /
+// trophy, the win reason "trophy" exists, and createRoom / queue carry
+// mode + playerCount; roomJoined / matchFound carry mode + playerCount.
 
 import com.blokblok.arena.game.BlockadeState
 import com.blokblok.arena.game.DeltaEvent
@@ -22,7 +25,9 @@ import com.blokblok.arena.game.PlayerColor
 import com.blokblok.arena.game.PlayerState
 import com.blokblok.arena.game.PlayerStats
 import com.blokblok.arena.game.Snapshot
+import com.blokblok.arena.game.TrophyCell
 import com.blokblok.arena.game.WinReason
+import com.blokblok.arena.game.trophyCellFor
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -52,8 +57,14 @@ sealed interface ServerMessage {
         val gridSize: Int,
         val durationSec: Int,
         val players: List<LobbyPlayer>,
+        /** Players in the room (2, or 4 in trophy mode). Defaults to players.size. */
+        val playerCount: Int = 2,
     ) : ServerMessage
-    data class LobbyUpdate(val players: List<LobbyPlayer>) : ServerMessage
+    data class LobbyUpdate(
+        val players: List<LobbyPlayer>,
+        val mode: GameMode = GameMode.RACE,
+        val playerCount: Int = 2,
+    ) : ServerMessage
     data class Queued(val position: Int) : ServerMessage
     data object QueueLeft : ServerMessage
     data class MatchFound(
@@ -61,6 +72,10 @@ sealed interface ServerMessage {
         val roomCode: String,
         val token: String,
         val opponent: LobbyPlayer,
+        val mode: GameMode = GameMode.RACE,
+        val playerCount: Int = 2,
+        /** All opponents (2P: just [opponent]; 4P trophy: the other 3). */
+        val opponents: List<LobbyPlayer> = listOf(opponent),
     ) : ServerMessage
     data class Countdown(val seconds: Int) : ServerMessage
     data class MatchStart(val snapshot: Snapshot) : ServerMessage
@@ -86,9 +101,14 @@ sealed interface ServerMessage {
 // ---------------------------------------------------------------------------
 sealed interface ClientMessage {
     data class Hello(val name: String, val clientVersion: String) : ClientMessage
-    data class CreateRoom(val mode: GameMode, val gridSize: Int, val durationSec: Int) : ClientMessage
+    data class CreateRoom(
+        val mode: GameMode,
+        val gridSize: Int,
+        val durationSec: Int,
+        val playerCount: Int = 2,
+    ) : ClientMessage
     data class JoinRoom(val roomCode: String) : ClientMessage
-    data class Queue(val mode: GameMode, val gridSize: Int) : ClientMessage
+    data class Queue(val mode: GameMode, val gridSize: Int, val playerCount: Int = 2) : ClientMessage
     data object LeaveQueue : ClientMessage
     data class Ready(val ready: Boolean) : ClientMessage
     data object Start : ClientMessage
@@ -109,9 +129,10 @@ fun encodeClientMessage(msg: ClientMessage): String {
             }
             is ClientMessage.CreateRoom -> {
                 put("type", "createRoom")
-                put("mode", "race")
+                put("mode", msg.mode.name.lowercase())
                 put("gridSize", msg.gridSize)
                 put("durationSec", msg.durationSec)
+                put("playerCount", msg.playerCount)
             }
             is ClientMessage.JoinRoom -> {
                 put("type", "joinRoom")
@@ -119,8 +140,9 @@ fun encodeClientMessage(msg: ClientMessage): String {
             }
             is ClientMessage.Queue -> {
                 put("type", "queue")
-                put("mode", "race")
+                put("mode", msg.mode.name.lowercase())
                 put("gridSize", msg.gridSize)
+                put("playerCount", msg.playerCount)
             }
             is ClientMessage.LeaveQueue -> put("type", "leaveQueue")
             is ClientMessage.Ready -> {
@@ -195,7 +217,14 @@ private fun parseDir(s: String): Dir = when (s.lowercase()) {
 
 private fun parseOrientation(s: String): Orientation = if (s.lowercase() == "v") Orientation.V else Orientation.H
 
-private fun parseColor(s: String): PlayerColor = if (s.lowercase() == "red") PlayerColor.RED else PlayerColor.BLUE
+private fun parseColor(s: String): PlayerColor = when (s.lowercase()) {
+    "red" -> PlayerColor.RED
+    "green" -> PlayerColor.GREEN
+    "amber" -> PlayerColor.AMBER
+    else -> PlayerColor.BLUE
+}
+
+private fun parseMode(s: String): GameMode = if (s.lowercase() == "trophy") GameMode.TROPHY else GameMode.RACE
 
 private fun parseStatus(s: String): MatchStatus = when (s.lowercase()) {
     "lobby" -> MatchStatus.LOBBY
@@ -206,6 +235,7 @@ private fun parseStatus(s: String): MatchStatus = when (s.lowercase()) {
 
 private fun parseWinReason(s: String): WinReason = when (s.lowercase()) {
     "goal" -> WinReason.GOAL
+    "trophy" -> WinReason.TROPHY
     "timeout" -> WinReason.TIMEOUT
     "forfeit" -> WinReason.FORFEIT
     else -> WinReason.DRAW
@@ -254,13 +284,24 @@ private fun parseBlockade(o: JsonObject): BlockadeState {
     )
 }
 
+private fun parseTrophy(o: JsonObject?): TrophyCell? {
+    if (o == null) return null
+    return TrophyCell(row = o.int("row"), col = o.int("col"))
+}
+
 private fun parseSnapshot(o: JsonObject): Snapshot {
     val players = o.arr("players")?.map { parsePlayer(it.jsonObject) } ?: emptyList()
+    val mode = parseMode(o.str("mode"))
+    val gridSize = o.int("gridSize", 12)
+    // Trophy cell: from the wire when present, else derived from the grid
+    // size (centre cell) in trophy mode, null in race mode.
+    val trophy = parseTrophy(o.obj("trophy"))
+        ?: if (mode == GameMode.TROPHY) trophyCellFor(gridSize) else null
     return Snapshot(
         tick = o.long("tick"),
         status = parseStatus(o.str("status")),
-        mode = GameMode.RACE,
-        gridSize = o.int("gridSize", 12),
+        mode = mode,
+        gridSize = gridSize,
         durationSec = o.int("durationSec", 180),
         timeLeftMs = o.long("timeLeftMs"),
         players = players,
@@ -271,6 +312,8 @@ private fun parseSnapshot(o: JsonObject): Snapshot {
         activePlayerId = o.str("activePlayerId").ifBlank { players.firstOrNull()?.id ?: "" },
         turnNumber = o.int("turnNumber", 1),
         turnDeadlineMs = o.long("turnDeadlineMs"),
+        playerCount = o.int("playerCount", players.size.coerceAtLeast(2)),
+        trophy = trophy,
     )
 }
 
@@ -313,20 +356,38 @@ fun parseServerMessage(text: String): ServerMessage? {
     return when (val type = root.str("type")) {
         "welcome" -> ServerMessage.Welcome(root.str("playerId"), root.str("serverVersion"))
         "roomCreated" -> ServerMessage.RoomCreated(root.str("roomId"), root.str("roomCode"), root.str("token"))
-        "roomJoined" -> ServerMessage.RoomJoined(
-            root.str("roomId"), root.str("roomCode"), GameMode.RACE,
-            root.int("gridSize", 12), root.int("durationSec", 180),
-            root.arr("players")?.map { parseLobbyPlayer(it.jsonObject) } ?: emptyList(),
-        )
-        "lobbyUpdate" -> ServerMessage.LobbyUpdate(
-            root.arr("players")?.map { parseLobbyPlayer(it.jsonObject) } ?: emptyList(),
-        )
+        "roomJoined" -> {
+            val players = root.arr("players")?.map { parseLobbyPlayer(it.jsonObject) } ?: emptyList()
+            ServerMessage.RoomJoined(
+                root.str("roomId"), root.str("roomCode"), parseMode(root.str("mode")),
+                root.int("gridSize", 12), root.int("durationSec", 180),
+                players,
+                root.int("playerCount", players.size.coerceAtLeast(2)),
+            )
+        }
+        "lobbyUpdate" -> {
+            val players = root.arr("players")?.map { parseLobbyPlayer(it.jsonObject) } ?: emptyList()
+            ServerMessage.LobbyUpdate(
+                players,
+                parseMode(root.str("mode")),
+                root.int("playerCount", players.size.coerceAtLeast(2)),
+            )
+        }
         "queued" -> ServerMessage.Queued(root.int("position"))
         "queueLeft" -> ServerMessage.QueueLeft
-        "matchFound" -> ServerMessage.MatchFound(
-            root.str("roomId"), root.str("roomCode"), root.str("token"),
-            root.obj("opponent")?.let { parseLobbyPlayer(it) } ?: LobbyPlayer("", "Opponent", ready = true, isHost = false),
-        )
+        "matchFound" -> {
+            val opponent = root.obj("opponent")?.let { parseLobbyPlayer(it) }
+                ?: LobbyPlayer("", "Opponent", ready = true, isHost = false)
+            val opponents = root.arr("opponents")?.map { parseLobbyPlayer(it.jsonObject) }
+                ?: listOf(opponent)
+            ServerMessage.MatchFound(
+                root.str("roomId"), root.str("roomCode"), root.str("token"),
+                opponent,
+                parseMode(root.str("mode")),
+                root.int("playerCount", opponents.size.coerceAtLeast(2)),
+                opponents,
+            )
+        }
         "countdown" -> ServerMessage.Countdown(root.int("seconds", 3))
         "matchStart" -> root.obj("snapshot")?.let { ServerMessage.MatchStart(parseSnapshot(it)) }
             ?: ServerMessage.Unknown(type, text)

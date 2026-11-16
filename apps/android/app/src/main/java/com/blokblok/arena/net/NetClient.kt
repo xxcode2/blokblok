@@ -215,16 +215,25 @@ class NetClient(
         scope.launch { sendRaw(msg) }
     }
 
-    fun createRoom(gridSize: Int, durationSec: Int) {
-        send(ClientMessage.CreateRoom(com.blokblok.arena.game.GameMode.RACE, gridSize, durationSec))
+    fun createRoom(
+        gridSize: Int,
+        durationSec: Int,
+        mode: com.blokblok.arena.game.GameMode = com.blokblok.arena.game.GameMode.RACE,
+        playerCount: Int = 2,
+    ) {
+        send(ClientMessage.CreateRoom(mode, gridSize, durationSec, playerCount))
     }
 
     fun joinRoom(roomCode: String) {
         send(ClientMessage.JoinRoom(roomCode.trim().uppercase()))
     }
 
-    fun queue(gridSize: Int) {
-        send(ClientMessage.Queue(com.blokblok.arena.game.GameMode.RACE, gridSize))
+    fun queue(
+        gridSize: Int,
+        mode: com.blokblok.arena.game.GameMode = com.blokblok.arena.game.GameMode.RACE,
+        playerCount: Int = 2,
+    ) {
+        send(ClientMessage.Queue(mode, gridSize, playerCount))
     }
 
     fun leaveQueue() {

@@ -6,8 +6,8 @@ package com.blokblok.arena.game
 
 enum class Dir { UP, DOWN, LEFT, RIGHT }
 enum class Orientation { H, V }
-enum class PlayerColor { BLUE, RED }
-enum class GameMode { RACE }
+enum class PlayerColor { BLUE, RED, GREEN, AMBER }
+enum class GameMode { RACE, TROPHY }
 enum class MatchStatus { LOBBY, COUNTDOWN, PLAYING, FINISHED }
 
 /** One grid edge. 'H' at (row,col) is the top side of cell (row,col);
@@ -51,6 +51,12 @@ data class BlockadeState(
     val deployDurationMs: Long? = null,
 )
 
+/** The trophy cell in trophy mode: the exact centre cell of the board,
+ *  `{ row: floor(n/2), col: floor(n/2) }` — 12 → (6,6), 20 → (10,10). */
+data class TrophyCell(val row: Int, val col: Int)
+
+fun trophyCellFor(gridSize: Int): TrophyCell = TrophyCell(gridSize / 2, gridSize / 2)
+
 data class Snapshot(
     val tick: Long,
     val status: MatchStatus,
@@ -67,6 +73,10 @@ data class Snapshot(
     val turnNumber: Int,
     /** Epoch ms when the current turn expires (30 s after it started). */
     val turnDeadlineMs: Long,
+    /** Number of players in the match (2, or 4 in trophy mode). */
+    val playerCount: Int = 2,
+    /** Trophy cell in trophy mode, null in race mode. */
+    val trophy: TrophyCell? = null,
 )
 
 sealed interface DeltaEvent {
@@ -90,7 +100,7 @@ sealed interface DeltaEvent {
     ) : DeltaEvent
 }
 
-enum class WinReason { GOAL, TIMEOUT, FORFEIT, DRAW }
+enum class WinReason { GOAL, TROPHY, TIMEOUT, FORFEIT, DRAW }
 
 data class LobbyPlayer(
     val id: String,
@@ -111,11 +121,14 @@ data class MatchResultData(
 data class PlayerStats(val moves: Int, val blockades: Int)
 
 // ---------------------------------------------------------------------------
-// Tunables (GAME_RULES.md) — TURN-BASED model, protocol 1.1.0.
+// Tunables (GAME_RULES.md) — TURN-BASED model, protocol 1.2.0.
 // One action per turn (move 1 cell OR place 1 blockade); the turn then
 // passes. No move/place cooldowns and no input buffering any more.
+// Modes: RACE (2 players, goal rows) and TROPHY (2 or 4 players, centre
+// trophy cell wins). Trophy mode + 4 players: P3 green spawns left-centre,
+// P4 amber spawns right-centre; turns rotate P1→P2→P3→P4→P1…
 // ---------------------------------------------------------------------------
-const val PROTOCOL_VERSION = "1.1.0"
+const val PROTOCOL_VERSION = "1.2.0"
 const val TURN_DURATION_MS = 30000L
 /** Energy gained by the incoming player at the start of each of their turns. */
 const val ENERGY_PER_TURN = 10
@@ -149,7 +162,16 @@ val DIRS: Map<Dir, Pair<Int, Int>> = mapOf(
 
 fun edgeKey(row: Int, col: Int, orientation: Orientation): String = "${orientation.name}:$row:$col"
 
-/** The L single edges covered by a blockade anchored at [edge]. */
+/** Spawn colour by seat: P1 blue, P2 red, P3 green (#22c55e), P4 amber (#f59e0b). */
+fun colorForSeat(index: Int): PlayerColor = when (index) {
+    0 -> PlayerColor.BLUE
+    1 -> PlayerColor.RED
+    2 -> PlayerColor.GREEN
+    else -> PlayerColor.AMBER
+}
+
+/** Display label for a seat ("P1".."P4"). */
+fun labelForSeat(index: Int): String = "P${index + 1}"
 fun edgesForBlockade(edge: Edge): List<Edge> {
     val out = ArrayList<Edge>(edge.len)
     for (i in 0 until edge.len) {

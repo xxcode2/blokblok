@@ -1,12 +1,17 @@
 package com.blokblok.arena.game
 
 // BLOCKADE ARENA — authoritative game engine (Kotlin port).
-// Implements GAME_RULES.md exactly: Race to the Top, edge-model blockades,
-// BFS fairness rule, turn-based play, timer + timeout scoring.
-// TURN-BASED model (protocol 1.1.0): one action per turn (move 1 cell OR
+// Implements GAME_RULES.md exactly: Race to the Top + Trophy mode,
+// edge-model blockades, BFS fairness rule, turn-based play, timer +
+// timeout scoring.
+// TURN-BASED model (protocol 1.2.0): one action per turn (move 1 cell OR
 // place 1 blockade), then the turn passes; the incoming player gains
 // ENERGY_PER_TURN energy (cap 100); a turn expires after TURN_DURATION_MS
 // and auto-passes with no other penalty. No cooldowns, no input buffering.
+// TROPHY mode (protocol 1.2.0): 2 or 4 players race to the centre trophy
+// cell floor(n/2),floor(n/2); landing on it wins immediately (reason
+// "trophy"). 4P spawns: P1 bottom-centre, P2 top-centre, P3 left-centre
+// (green), P4 right-centre (amber); turns rotate P1→P2→P3→P4→P1…
 // Deterministic, no I/O. Ticked at 20/s (50 ms steps) locally and by the
 // server. Mirrors packages/core/src/engine.ts line for line in behaviour.
 
@@ -42,7 +47,12 @@ class GameEngine(
     val gridSize: Int = DEFAULT_GRID_SIZE,
     val durationSec: Int = DEFAULT_DURATION_SEC,
     val mode: GameMode = GameMode.RACE,
+    playerCountIn: Int = 2,
 ) {
+    /** 2 in race mode (forced); 2 or 4 in trophy mode. */
+    val playerCount: Int = if (mode == GameMode.RACE) 2 else playerCountIn.coerceIn(2, 4)
+    /** Trophy cell in trophy mode, null in race mode. */
+    val trophy: TrophyCell? get() = if (mode == GameMode.TROPHY) trophyCellFor(gridSize) else null
     var tickCount: Long = 0
         private set
     var status: MatchStatus = MatchStatus.PLAYING
@@ -82,7 +92,7 @@ class GameEngine(
         private var blockadeSeq = 0
 
         fun fromSnapshot(snap: Snapshot): GameEngine {
-            val eng = GameEngine(snap.gridSize, snap.durationSec, snap.mode)
+            val eng = GameEngine(snap.gridSize, snap.durationSec, snap.mode, snap.playerCount)
             eng.tickCount = snap.tick
             eng.status = snap.status
             eng.timeLeftMs = snap.timeLeftMs
@@ -131,13 +141,21 @@ class GameEngine(
 
     // -- setup ---------------------------------------------------------------
     fun addPlayer(id: String, name: String): PlayerState {
-        require(players.size < 2) { "Race mode supports exactly 2 players" }
+        require(players.size < playerCount) { "mode $mode supports up to $playerCount players" }
         val idx = players.size
-        val color = if (idx == 0) PlayerColor.BLUE else PlayerColor.RED
+        val color = colorForSeat(idx)
         val centre = gridSize / 2
+        // Spawns: P1 bottom-centre, P2 top-centre (both modes);
+        // P3 left-centre, P4 right-centre (4P trophy only).
+        val (spawnRow, spawnCol) = when (idx) {
+            0 -> (gridSize - 1) to centre
+            1 -> 0 to centre
+            2 -> centre to 0
+            else -> centre to (gridSize - 1)
+        }
         val p = PlayerInternal(
             id = id, name = name, color = color,
-            row = if (idx == 0) gridSize - 1 else 0, col = centre,
+            row = spawnRow, col = spawnCol,
             energy = MAX_ENERGY.toDouble(),
             score = 0, moves = 0, blockadesPlaced = 0, anim = null,
         )
@@ -169,12 +187,14 @@ class GameEngine(
     private fun nowMs(): Long =
         if (currentNowMs > 0) currentNowMs else System.currentTimeMillis()
 
-    /** Pass the turn to the other player. The incoming player gains
-     *  ENERGY_PER_TURN energy (capped at MAX_ENERGY); the new turn expires
-     *  at [deadlineMs]. Returns the events it recorded. */
+    /** Pass the turn to the NEXT player in rotation (P1→P2→P3→P4→P1…).
+     *  The incoming player gains ENERGY_PER_TURN energy (capped at
+     *  MAX_ENERGY); the new turn expires at [deadlineMs]. Returns the
+     *  events it recorded. */
     private fun passTurn(deadlineMs: Long): List<DeltaEvent> {
         if (status != MatchStatus.PLAYING || players.size < 2) return emptyList()
-        val next = players.find { it.id != activePlayerId } ?: return emptyList()
+        val curIdx = players.indexOfFirst { it.id == activePlayerId }.takeIf { it >= 0 } ?: 0
+        val next = players[(curIdx + 1) % players.size]
         activePlayerId = next.id
         turnNumber += 1
         turnDeadlineMs = deadlineMs
@@ -203,9 +223,41 @@ class GameEngine(
         return tickMs(dt, nowMs)
     }
 
+    /** Goal row in race mode (BLUE → row 0, RED → row N-1). Unused in
+     *  trophy mode, where every player targets the trophy cell. */
     internal fun goalRow(p: PlayerInternal): Int = if (p.color == PlayerColor.BLUE) 0 else gridSize - 1
     internal fun rowsRemaining(p: PlayerInternal): Int = kotlin.math.abs(p.row - goalRow(p))
-    internal fun progress(p: PlayerInternal): Float = 1f - rowsRemaining(p).toFloat() / (gridSize - 1)
+
+    /** Target of a player: (row, col) — col is null in race mode (any cell
+     *  on the goal row counts) and the trophy cell in trophy mode. */
+    internal fun targetOf(p: PlayerInternal): Pair<Int, Int?> =
+        if (mode == GameMode.TROPHY) {
+            val t = trophyCellFor(gridSize)
+            t.row to t.col
+        } else {
+            goalRow(p) to null
+        }
+
+    /** Distance to this player's target (BFS steps), or null if unreachable.
+     *  Race: steps to the goal row. Trophy: steps to the trophy cell. */
+    internal fun distanceToTarget(p: PlayerInternal): Int {
+        if (mode == GameMode.RACE) return rowsRemaining(p)
+        // Trophy: BFS distance, falling back to Manhattan distance if no
+        // path exists (cannot happen while the BFS fairness rule holds).
+        return shortestPathLength(p.id) ?: run {
+            val t = trophyCellFor(gridSize)
+            kotlin.math.abs(p.row - t.row) + kotlin.math.abs(p.col - t.col)
+        }
+    }
+
+    internal fun progress(p: PlayerInternal): Float {
+        if (mode == GameMode.TROPHY) {
+            // 1.0 on the trophy, 0.0 at the farthest corner.
+            val maxDist = 2 * (gridSize / 2)
+            return (1f - distanceToTarget(p).toFloat() / maxDist).coerceIn(0f, 1f)
+        }
+        return 1f - rowsRemaining(p).toFloat() / (gridSize - 1)
+    }
 
     // -- edge model ----------------------------------------------------------
     fun isEdgeBlocked(row: Int, col: Int, orientation: Orientation): Boolean =
@@ -234,11 +286,12 @@ class GameEngine(
     }
 
     // -- pathfinding (BFS fairness rule) --------------------------------------
-    /** Shortest path length in moves from a player's cell to their goal row,
-     *  or null if unreachable. `extra` edges are treated as blocked too. */
+    /** Shortest path length in moves from a player's cell to their target
+     *  (goal row in race, trophy cell in trophy), or null if unreachable.
+     *  `extra` edges are treated as blocked too. */
     fun shortestPathLength(playerId: String, extra: Set<String>? = null): Int? {
         val p = getPlayer(playerId) ?: return null
-        val goal = goalRow(p)
+        val (goal, goalCol) = targetOf(p)
         fun blockedAt(r: Int, c: Int, dir: Dir): Boolean {
             if (extra != null) {
                 when (dir) {
@@ -256,7 +309,7 @@ class GameEngine(
         queue += Triple(p.row, p.col, 0)
         while (queue.isNotEmpty()) {
             val (r, c, d) = queue.removeFirst()
-            if (r == goal) return d
+            if (r == goal && (goalCol == null || c == goalCol)) return d
             for ((dir, dd) in DIRS) {
                 val nr = r + dd.first
                 val nc = c + dd.second
@@ -271,15 +324,23 @@ class GameEngine(
         return null
     }
 
-    /** Next direction along a shortest path to the goal, or null. */
+    /** Next direction along a shortest path to the target (goal row in
+     *  race, trophy cell in trophy), or null. */
     fun nextStepTowardGoal(playerId: String): Dir? {
         val p = getPlayer(playerId) ?: return null
-        val goal = goalRow(p)
+        val (goal, goalCol) = targetOf(p)
         val dist = HashMap<String, Int>()
         val queue = ArrayDeque<Pair<Int, Int>>()
-        for (c in 0 until gridSize) {
-            dist["$goal,$c"] = 0
-            queue += goal to c
+        if (goalCol == null) {
+            // Race: every cell on the goal row is distance 0.
+            for (c in 0 until gridSize) {
+                dist["$goal,$c"] = 0
+                queue += goal to c
+            }
+        } else {
+            // Trophy: only the trophy cell itself is distance 0.
+            dist["$goal,$goalCol"] = 0
+            queue += goal to goalCol
         }
         while (queue.isNotEmpty()) {
             val (r, c) = queue.removeFirst()
@@ -333,7 +394,8 @@ class GameEngine(
             }
             if (blocked.contains(edgeKey(s.row, s.col, s.orientation))) return "INVALID_BLOCKADE"
         }
-        // BFS fairness: both players must keep a path to their goal.
+        // BFS fairness: EVERY player must keep a path to their target
+        // (goal row in race, trophy cell in trophy).
         val extra = singles.map { edgeKey(it.row, it.col, it.orientation) }.toSet()
         for (q in players) {
             if (shortestPathLength(q.id, extra) == null) return "NO_PATH"
@@ -364,8 +426,16 @@ class GameEngine(
         p.moves++
         val events: List<DeltaEvent> = listOf(DeltaEvent.Move(playerId, nr, nc, tickCount))
         record(events)
-        if (nr == goalRow(p)) {
-            finish(p.id, WinReason.GOAL)
+        // Win check: race = step onto your goal row; trophy = land on the
+        // trophy cell (wins immediately, reason "trophy").
+        val won = if (mode == GameMode.TROPHY) {
+            val t = trophyCellFor(gridSize)
+            nr == t.row && nc == t.col
+        } else {
+            nr == goalRow(p)
+        }
+        if (won) {
+            finish(p.id, if (mode == GameMode.TROPHY) WinReason.TROPHY else WinReason.GOAL)
             return EngineResult.Ok(events)
         }
         // Exactly one action per turn: the turn passes now.
@@ -530,16 +600,17 @@ class GameEngine(
     }
 
     private fun finishByTimeout() {
-        if (players.size < 2) {
-            finish(players.firstOrNull()?.id, WinReason.TIMEOUT)
+        if (players.isEmpty()) {
+            finish(null, WinReason.DRAW)
             return
         }
-        val a = players[0]
-        val b = players[1]
-        val ra = rowsRemaining(a)
-        val rb = rowsRemaining(b)
-        if (ra == rb) finish(null, WinReason.DRAW)
-        else finish(if (ra < rb) a.id else b.id, WinReason.TIMEOUT)
+        // Closest to the target wins: fewest rows remaining in race,
+        // shortest BFS distance to the trophy in trophy mode. Tie = draw.
+        val dists = players.map { it to distanceToTarget(it) }
+        val best = dists.minOf { it.second }
+        val leaders = dists.filter { it.second == best }
+        if (leaders.size > 1) finish(null, WinReason.DRAW)
+        else finish(leaders.first().first.id, WinReason.TIMEOUT)
     }
 
     fun forfeit(playerId: String) {
@@ -608,6 +679,8 @@ class GameEngine(
         activePlayerId = activePlayerId,
         turnNumber = turnNumber,
         turnDeadlineMs = turnDeadlineMs,
+        playerCount = players.size,
+        trophy = trophy,
     )
 
     fun stats(): Map<String, PlayerStats> {
@@ -643,13 +716,26 @@ fun validateEdgeAgainstSnapshot(snap: Snapshot, playerId: String, edge: Edge): S
     }
     val extra = singles.map { edgeKey(it.row, it.col, it.orientation) }.toSet()
     for (q in snap.players) {
-        val goal = if (q.color == PlayerColor.BLUE) 0 else n - 1
-        if (bfsFromSnapshot(n, blocked + extra, q.row, q.col, goal) == null) return "NO_PATH"
+        // BFS fairness target: goal row in race, trophy cell in trophy.
+        val (tr, tc) = if (snap.mode == GameMode.TROPHY) {
+            val t = snap.trophy ?: trophyCellFor(n)
+            t.row to t.col
+        } else {
+            (if (q.color == PlayerColor.BLUE) 0 else n - 1) to null
+        }
+        if (bfsFromSnapshot(n, blocked + extra, q.row, q.col, tr, tc) == null) return "NO_PATH"
     }
     return null
 }
 
-private fun bfsFromSnapshot(n: Int, blocked: Set<String>, sr: Int, sc: Int, goal: Int): Int? {
+private fun bfsFromSnapshot(
+    n: Int,
+    blocked: Set<String>,
+    sr: Int,
+    sc: Int,
+    goal: Int,
+    goalCol: Int? = null,
+): Int? {
     val seen = HashSet<String>()
     seen += "$sr,$sc"
     val queue = ArrayDeque<Triple<Int, Int, Int>>()
@@ -662,7 +748,7 @@ private fun bfsFromSnapshot(n: Int, blocked: Set<String>, sr: Int, sc: Int, goal
     }
     while (queue.isNotEmpty()) {
         val (r, c, d) = queue.removeFirst()
-        if (r == goal) return d
+        if (r == goal && (goalCol == null || c == goalCol)) return d
         for ((dir, dd) in DIRS) {
             val nr = r + dd.first
             val nc = c + dd.second

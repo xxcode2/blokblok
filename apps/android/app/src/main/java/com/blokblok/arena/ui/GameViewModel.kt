@@ -43,6 +43,10 @@ data class MatchConfig(
     val gridSize: Int = 12,
     val durationSec: Int = 180,
     val roomCode: String? = null,
+    /** RACE (2 players, goal rows) or TROPHY (2 or 4 players, centre trophy). */
+    val mode: GameMode = GameMode.RACE,
+    /** 2, or 4 in trophy mode (locked to 2 in race mode). */
+    val playerCount: Int = 2,
 )
 
 enum class ConnectionState { CONNECTING, ONLINE, RECONNECTING, OFFLINE }
@@ -72,6 +76,11 @@ class GameViewModel : ViewModel() {
     private val _roomCode = MutableStateFlow<String?>(null)
     val roomCode: StateFlow<String?> = _roomCode.asStateFlow()
 
+    /** Players expected in the current online room (2, or 4 in trophy mode).
+     *  Set from roomJoined / matchFound; the lobby uses it for its start gate. */
+    private val _roomPlayerCount = MutableStateFlow<Int?>(null)
+    val roomPlayerCount: StateFlow<Int?> = _roomPlayerCount.asStateFlow()
+
     private val _myId = MutableStateFlow<String?>(null)
     val myId: StateFlow<String?> = _myId.asStateFlow()
 
@@ -81,10 +90,11 @@ class GameViewModel : ViewModel() {
     private var localJob: Job? = null
     /** One-shot pending AI action for the current AI turn (see startLocal). */
     private var aiPending: Job? = null
-    /** Turn number the AI has already acted on (prevents double actions). */
-    private var lastAiTurn: Int = 0
     private var myLocalId: String = "p1"
-    private var localPlayer2Id: String = "p2"
+    /** AI-controlled player ids in local practice (1 in 2P, 3 in 4P trophy). */
+    private var localAiIds: List<String> = emptyList()
+    /** Turn number each AI has already acted on (prevents double actions). */
+    private var lastAiTurnByPlayer: MutableMap<String, Int> = mutableMapOf()
 
     /** Called by the screen when the user makes a move (for optimistic glide). */
     var onPredictedMove: ((playerId: String, dir: Dir) -> Unit)? = null
@@ -94,6 +104,7 @@ class GameViewModel : ViewModel() {
         _result.value = null
         _error.value = null
         _snapshot.value = null
+        _roomPlayerCount.value = null
         when (cfg.kind) {
             MatchKind.PRACTICE, MatchKind.LOCAL_2P -> startLocal(cfg, settings)
             MatchKind.ONLINE_PRIVATE, MatchKind.ONLINE_QUEUE -> startOnline(cfg, settings)
@@ -105,30 +116,40 @@ class GameViewModel : ViewModel() {
     // ------------------------------------------------------------------
     private fun startLocal(cfg: MatchConfig, settings: ArenaSettings) {
         _connection.value = ConnectionState.OFFLINE
+        // Race is always 2P; trophy takes the menu's player count (2 or 4).
+        val playerCount = if (cfg.mode == GameMode.TROPHY) cfg.playerCount.coerceIn(2, 4) else 2
         val eng = GameEngine(
             gridSize = cfg.gridSize,
             durationSec = cfg.durationSec,
-            mode = GameMode.RACE,
+            mode = cfg.mode,
+            playerCountIn = playerCount,
         )
         eng.addPlayer("p1", settings.playerName)
-        eng.addPlayer(
-            "p2",
-            if (cfg.kind == MatchKind.PRACTICE) "AI (${cfg.difficulty?.name ?: "NORMAL"})" else "Player 2",
-        )
+        if (cfg.kind == MatchKind.PRACTICE) {
+            // Practice: you vs 1 AI (2P) or vs 3 AI (4P trophy).
+            for (i in 2..playerCount) {
+                eng.addPlayer(
+                    "p$i",
+                    "AI $i (${cfg.difficulty?.name ?: "NORMAL"})",
+                )
+            }
+        } else {
+            // Local 2P: two humans, one device.
+            eng.addPlayer("p2", "Player 2")
+        }
         eng.start(System.currentTimeMillis())
         engine = eng
         val ids = eng.snapshot().players.map { it.id }
         myLocalId = ids.getOrNull(0) ?: "p1"
-        localPlayer2Id = ids.getOrNull(1) ?: "p2"
+        localAiIds = if (cfg.kind == MatchKind.PRACTICE) ids.drop(1) else emptyList()
         _myId.value = myLocalId
         _snapshot.value = eng.snapshot()
-        _lobbyPlayers.value = listOf(
-            LobbyPlayer(myLocalId, settings.playerName, ready = true, isHost = true),
-            LobbyPlayer(localPlayer2Id, eng.snapshot().players[1].name, ready = true, isHost = false),
-        )
+        _lobbyPlayers.value = eng.snapshot().players.mapIndexed { idx, p ->
+            LobbyPlayer(p.id, p.name, ready = true, isHost = idx == 0)
+        }
         localJob?.cancel()
         aiPending?.cancel()
-        lastAiTurn = 0
+        lastAiTurnByPlayer = mutableMapOf()
         localJob = viewModelScope.launch {
             while (isActive) {
                 delay(50)
@@ -141,24 +162,27 @@ class GameViewModel : ViewModel() {
                 // Turn-based AI: act ONCE per AI turn, ~500 ms after the
                 // turn starts. The engine + chooseAiAction both reject
                 // off-turn actions, so a stale/mis-fired job is a no-op.
+                // In 4P trophy each AI acts on its own turn.
                 if (cfg.kind == MatchKind.PRACTICE && cfg.difficulty != null &&
                     snap.status == MatchStatus.PLAYING &&
-                    snap.activePlayerId == localPlayer2Id &&
-                    snap.turnNumber != lastAiTurn
+                    snap.activePlayerId in localAiIds &&
+                    (lastAiTurnByPlayer[snap.activePlayerId] ?: 0) != snap.turnNumber
                 ) {
-                    lastAiTurn = snap.turnNumber
+                    val aiId = snap.activePlayerId
+                    val aiTurn = snap.turnNumber
+                    lastAiTurnByPlayer[aiId] = aiTurn
                     aiPending?.cancel()
                     aiPending = viewModelScope.launch {
                         delay(500)
                         val cur = _snapshot.value ?: return@launch
                         if (cur.status != MatchStatus.PLAYING) return@launch
-                        if (cur.activePlayerId != localPlayer2Id) return@launch
-                        if (cur.turnNumber != lastAiTurn) return@launch
+                        if (cur.activePlayerId != aiId) return@launch
+                        if (cur.turnNumber != aiTurn) return@launch
                         val engNow = engine ?: return@launch
-                        val action = chooseAiAction(engNow, localPlayer2Id, cfg.difficulty)
+                        val action = chooseAiAction(engNow, aiId, cfg.difficulty)
                         when (action) {
-                            is AiAction.Move -> engNow.move(localPlayer2Id, action.dir)
-                            is AiAction.Place -> engNow.place(localPlayer2Id, action.edge)
+                            is AiAction.Move -> engNow.move(aiId, action.dir)
+                            is AiAction.Place -> engNow.place(aiId, action.edge)
                             null -> Unit
                         }
                     }
@@ -183,7 +207,8 @@ class GameViewModel : ViewModel() {
         _result.value = ServerMessage.Result(
             winnerId = snap.winnerId,
             reason = if (snap.winnerId == null) WinReason.DRAW
-                else if (snap.timeLeftMs <= 0) WinReason.TIMEOUT else WinReason.GOAL,
+                else if (snap.timeLeftMs <= 0) WinReason.TIMEOUT
+                else if (snap.mode == GameMode.TROPHY) WinReason.TROPHY else WinReason.GOAL,
             scores = scores,
             stats = stats,
             durationMs = (snap.durationSec * 1000L) - snap.timeLeftMs,
@@ -225,12 +250,12 @@ class GameViewModel : ViewModel() {
                 when (cfg.kind) {
                     MatchKind.ONLINE_PRIVATE -> {
                         if (cfg.roomCode.isNullOrBlank()) {
-                            net?.createRoom(cfg.gridSize, cfg.durationSec)
+                            net?.createRoom(cfg.gridSize, cfg.durationSec, cfg.mode, cfg.playerCount)
                         } else {
                             net?.joinRoom(cfg.roomCode)
                         }
                     }
-                    MatchKind.ONLINE_QUEUE -> net?.queue(cfg.gridSize)
+                    MatchKind.ONLINE_QUEUE -> net?.queue(cfg.gridSize, cfg.mode, cfg.playerCount)
                     else -> Unit
                 }
             }
@@ -239,9 +264,11 @@ class GameViewModel : ViewModel() {
             }
             is ServerMessage.RoomJoined -> {
                 _roomCode.value = msg.roomCode
+                _roomPlayerCount.value = msg.playerCount
                 _lobbyPlayers.value = msg.players
             }
             is ServerMessage.LobbyUpdate -> {
+                _roomPlayerCount.value = msg.playerCount
                 _lobbyPlayers.value = msg.players
             }
             is ServerMessage.Queued -> {
@@ -252,6 +279,7 @@ class GameViewModel : ViewModel() {
             }
             is ServerMessage.MatchFound -> {
                 _roomCode.value = msg.roomCode
+                _roomPlayerCount.value = msg.playerCount
                 _queuePosition.value = null
             }
             is ServerMessage.Countdown -> {
