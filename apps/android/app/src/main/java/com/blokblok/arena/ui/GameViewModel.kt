@@ -303,7 +303,7 @@ class GameViewModel : ViewModel() {
                 _error.value = "Opponent left the match."
             }
             is ServerMessage.Error -> {
-                // NOT_YOUR_TURN (protocol 1.1.0): the server rejected an
+                // NOT_YOUR_TURN (protocol 1.2.0): the server rejected an
                 // off-turn input — surface it plainly, it is not fatal.
                 _error.value = if (msg.code == ERR_NOT_YOUR_TURN) {
                     "Bukan giliranmu — tunggu giliran berikutnya."

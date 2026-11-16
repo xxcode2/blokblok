@@ -148,7 +148,7 @@ fun Hud(
     }
 }
 
-/** Turn banner (protocol 1.1.0): whose turn it is + the turn number.
+/** Turn banner (protocol 1.2.0): whose turn it is + the turn number.
  *  [label] is e.g. "Giliran kamu", "Giliran lawan", or "Giliran P1".."Giliran P4"
  *  in local modes; [activeColor] is the active player's orb colour. */
 @Composable

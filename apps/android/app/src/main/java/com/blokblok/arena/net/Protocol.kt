@@ -5,7 +5,7 @@ package com.blokblok.arena.net
 // The client sends inputs only; the server is authoritative and sends
 // snapshots/deltas. Parsing is manual JsonObject mapping (no polymorphic
 // serializer) so a single unknown field can never crash the client.
-// Turn-based (1.1.0): snapshots carry activePlayerId / turnNumber /
+// Turn-based (1.2.0): snapshots carry activePlayerId / turnNumber /
 // turnDeadlineMs, deltas carry a "turn" event, and acting off-turn is
 // rejected with error code NOT_YOUR_TURN. No cooldown fields any more.
 // Trophy mode + 4 players (1.2.0): snapshots carry mode / playerCount /
@@ -307,7 +307,7 @@ private fun parseSnapshot(o: JsonObject): Snapshot {
         players = players,
         blockades = o.arr("blockades")?.map { parseBlockade(it.jsonObject) } ?: emptyList(),
         winnerId = o.nullableStr("winnerId"),
-        // Turn-based (protocol 1.1.0). Fall back to P1 / turn 1 when the
+        // Turn-based (protocol 1.2.0). Fall back to P1 / turn 1 when the
         // server omits the fields (pre-1.1.0 snapshot).
         activePlayerId = o.str("activePlayerId").ifBlank { players.firstOrNull()?.id ?: "" },
         turnNumber = o.int("turnNumber", 1),

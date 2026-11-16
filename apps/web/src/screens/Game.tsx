@@ -8,7 +8,7 @@
 // - Online: snapshots/deltas from the server; the renderer glides orbs
 //   between cells (150 ms easeOutCubic) and reconciles optimistically
 //   predicted moves when the authoritative state arrives.
-// - Turn-based (protocol 1.1.0): ONE action per turn — move 1 cell OR place
+// - Turn-based (protocol 1.2.0): ONE action per turn — move 1 cell OR place
 //   1 blockade — then the turn passes (30 s per turn, auto-pass on timeout).
 //   Out-of-turn input is ignored and the board dims; there are no cooldowns,
 //   no input buffering, and no hold-to-glide: every action is one discrete

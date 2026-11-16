@@ -1,5 +1,5 @@
 // In-game HUD: turn banner + turn timer, energy, progress, connection,
-// blockade controls. Turn-based (protocol 1.1.0): one action per turn, 30 s
+// blockade controls. Turn-based (protocol 1.2.0): one action per turn, 30 s
 // per turn — no cooldowns. The turn banner + timer bar live here and nowhere
 // else; the bar fill / seconds are updated every animation frame by the Game
 // screen's rAF loop through turnBarRef / turnTextRef (no second timer, and

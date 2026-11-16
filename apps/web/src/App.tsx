@@ -275,7 +275,7 @@ export function App(): React.ReactElement {
       setError("That mode + player count is not valid — Race is 2 players, Trophy is 2 or 4.");
       return;
     }
-    // Turn-based (protocol 1.1.0): start() arms turn 1 (P1) with its 30 s
+    // Turn-based (protocol 1.2.0): start() arms turn 1 (P1) with its 30 s
     // deadline — required before any tickMs/move, otherwise the engine's
     // turn clock is unanchored.
     eng.start(Date.now());
@@ -300,7 +300,7 @@ export function App(): React.ReactElement {
     const eng = new Engine({ gridSize: c.gridSize, durationSec: c.durationSec });
     eng.addPlayer("p1", `${c.name} · P1`);
     eng.addPlayer("p2", `${c.name} · P2`);
-    // Turn-based (protocol 1.1.0): start() arms turn 1 (P1) with its 30 s
+    // Turn-based (protocol 1.2.0): start() arms turn 1 (P1) with its 30 s
     // deadline — required before any tickMs/move, otherwise the engine's
     // turn clock is unanchored.
     eng.start(Date.now());
