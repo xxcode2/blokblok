@@ -5,6 +5,7 @@
   "private": true,
   "scripts": {
     "build": "tsc -p tsconfig.json && vite build",
+    "prebuild": "npm run build --workspace=@blockade/core",
     "dev": "vite",
     "preview": "vite preview"
   },
