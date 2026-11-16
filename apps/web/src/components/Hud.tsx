@@ -8,6 +8,7 @@
 import type { Orientation, Snapshot } from "@blockade/core";
 import { blockadeCost } from "@blockade/core";
 import type { RefObject } from "react";
+import { arenaModeOf } from "../game/mode";
 
 export interface HudProps {
   snap: Snapshot;
@@ -24,10 +25,10 @@ export interface HudProps {
   muted: boolean;
   onToggleMute: () => void;
   flash: string | null;
-  /** "Giliran kamu · Turn 3" / "Giliran lawan · Turn 3" / "Giliran P1 · Turn 3"; null when no turn is live. */
+  /** "Giliran kamu · Turn 3" / "Giliran P3 · Turn 3"; null when no turn is live. */
   turnLabel: string | null;
   /** Colour of the player whose turn it is (drives the banner dot). */
-  turnColor: "blue" | "red" | null;
+  turnColor: "blue" | "red" | "green" | "amber" | null;
   /** True when the banner marks the local player's own turn (online/practice). */
   turnMine: boolean;
   /** Bar fill driven imperatively every frame by the Game rAF loop. */
@@ -45,6 +46,8 @@ function fmtTime(ms: number): string {
 
 export function Hud(props: HudProps): React.ReactElement {
   const { snap } = props;
+  const mode = arenaModeOf(snap);
+  const trophy = mode === "trophy";
   const me = props.myId ? snap.players.find((p) => p.id === props.myId) : snap.players[0];
   const foe = props.myId ? snap.players.find((p) => p.id !== props.myId) : snap.players[1];
   const cost = blockadeCost(props.length);
@@ -64,20 +67,22 @@ export function Hud(props: HudProps): React.ReactElement {
       )}
       <div className="hud-row">
         <div className="hud-players">
-          {snap.players.map((p) => {
+          {/* Every player in the match, 2 or 4, each with their energy bar. */}
+          {snap.players.map((p, i) => {
             const isMe = p.id === props.myId;
             const isActive = p.id === snap.activePlayerId && snap.status === "playing";
             const goalRow = p.color === "blue" ? "row 0" : `row ${snap.gridSize - 1}`;
+            const progressTitle = trophy ? "Progress to the trophy" : `Progress to ${goalRow}`;
             return (
               <div key={p.id} className={`hud-player ${p.color}${isMe ? " me" : ""}${isActive ? " active-turn" : ""}`}>
                 <span className="hud-orb-dot" />
                 <span className="hud-name">
-                  {p.name}
+                  P{i + 1} · {p.name}
                   {isMe ? " (you)" : ""}
                   {isActive ? " ●" : ""}
                 </span>
                 <span className="hud-score">{p.score} pts</span>
-                <div className="hud-progress" title={`Progress to ${goalRow}`}>
+                <div className="hud-progress" title={progressTitle}>
                   <div className="hud-progress-fill" style={{ width: `${Math.round(p.progress * 100)}%` }} />
                 </div>
                 <span className="hud-energy-label">⚡ {Math.floor(p.energy)}/100</span>
@@ -92,7 +97,9 @@ export function Hud(props: HudProps): React.ReactElement {
           <div className="hud-timer" title="Match timer">
             ⏱ {fmtTime(snap.timeLeftMs)}
           </div>
-          <div className="hud-objective">🎯 First to the opposite goal row wins</div>
+          <div className="hud-objective">
+            {trophy ? "🏆 First to the trophy in the centre wins" : "🎯 First to the opposite goal row wins"}
+          </div>
           {props.online && (
             <div className={`hud-conn ${props.connected ? "ok" : "bad"}`} title="Connection to the game server">
               <span className="hud-conn-dot" />
@@ -157,9 +164,15 @@ export function Hud(props: HudProps): React.ReactElement {
           </>
         )}
       </div>
-      {foe && me && (
+      {me && snap.players.length === 2 && foe && (
         <div className="hud-vs">
           {me.name} vs {foe.name} · {snap.gridSize}×{snap.gridSize} · Race to the Top · one action per turn
+        </div>
+      )}
+      {me && snap.players.length > 2 && (
+        <div className="hud-vs">
+          {snap.players.map((p) => p.name).join(" · ")} · {snap.gridSize}×{snap.gridSize} ·{" "}
+          {trophy ? "Rebut Piala" : "Race to the Top"} · one action per turn
         </div>
       )}
     </div>

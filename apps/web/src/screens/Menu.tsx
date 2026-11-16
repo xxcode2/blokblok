@@ -4,12 +4,17 @@
 import { useState } from "react";
 import type { AiDifficulty } from "../ai";
 import type { GridSize } from "@blockade/core";
+import type { ArenaMode, ArenaPlayerCount } from "../game/mode";
 
 export interface MenuChoices {
   name: string;
   ranked: boolean;
   gridSize: GridSize;
   durationSec: number;
+  /** Game mode: race to the goal row, or first to the centre trophy. */
+  mode: ArenaMode;
+  /** 2 players, or 4 (trophy mode only — race locks to 2). */
+  playerCount: ArenaPlayerCount;
 }
 
 export interface MenuProps {
@@ -32,8 +37,23 @@ export function Menu(props: MenuProps): React.ReactElement {
   const [joinCode, setJoinCode] = useState("");
   const [showJoin, setShowJoin] = useState(false);
   const [showPractice, setShowPractice] = useState(false);
+  const [mode, setMode] = useState<ArenaMode>("race");
+  const [playerCount, setPlayerCount] = useState<ArenaPlayerCount>(2);
 
-  const choices = (): MenuChoices => ({ name: props.name.trim() || "Player", ranked, gridSize, durationSec });
+  const choices = (): MenuChoices => ({
+    name: props.name.trim() || "Player",
+    ranked,
+    gridSize,
+    durationSec,
+    mode,
+    playerCount,
+  });
+
+  const pickMode = (m: ArenaMode) => {
+    setMode(m);
+    // Race is 2 players only — the player-count picker locks to 2.
+    if (m === "race") setPlayerCount(2);
+  };
 
   return (
     <div className="menu-screen">
@@ -73,6 +93,30 @@ export function Menu(props: MenuProps): React.ReactElement {
               <option value={300}>5 min</option>
             </select>
           </label>
+        </div>
+
+        <div className="mode-toggle" title="Race: first to the opposite goal row. Trophy: first to the trophy in the centre of the board.">
+          <button className={mode === "race" ? "active" : ""} onClick={() => pickMode("race")}>
+            🏁 Race to the Top
+          </button>
+          <button className={mode === "trophy" ? "active" : ""} onClick={() => pickMode("trophy")}>
+            🏆 Rebut Piala
+          </button>
+        </div>
+
+        <div className="mode-toggle" title={mode === "race" ? "Race to the Top is 2 players only" : "Trophy mode: 2 or 4 players"}>
+          <button className={playerCount === 2 ? "active" : ""} onClick={() => setPlayerCount(2)}>
+            👤👤 2 pemain
+          </button>
+          <button
+            className={playerCount === 4 ? "active" : ""}
+            disabled={mode === "race"}
+            onClick={() => setPlayerCount(4)}
+            title={mode === "race" ? "4 players needs Trophy mode" : "4 players — P1 vs P2 vs P3 vs P4"}
+          >
+            👥 4 pemain
+          </button>
+          {mode === "race" && <span className="picker-note">Race locks to 2 players — pick Rebut Piala for 4.</span>}
         </div>
 
         <div className="mode-toggle" title="Ranked-lite: ±points per match, kept in this browser only">
@@ -137,12 +181,29 @@ export function Menu(props: MenuProps): React.ReactElement {
               ))}
             </div>
           )}
-          <button className="btn" onClick={() => props.onLocal2P(choices())}>
+          {showPractice && (
+            <p className="picker-note">
+              {mode === "trophy" && playerCount === 4
+                ? "Practice: you vs 3 AI (P2, P3, P4) — first to the centre trophy wins."
+                : mode === "trophy"
+                  ? "Practice: you vs 1 AI — first to the centre trophy wins."
+                  : "Practice: you vs 1 AI — first to the opposite goal row wins."}
+            </p>
+          )}
+          <button
+            className="btn"
+            disabled={mode !== "race" || playerCount !== 2}
+            title={mode !== "race" || playerCount !== 2 ? "Local play is Race 2P only — pick Race + 2 pemain" : "Two players, one device"}
+            onClick={() => props.onLocal2P(choices())}
+          >
             👥 Local 2P — one device
           </button>
         </div>
 
         <p className="menu-foot">
+          {mode === "trophy"
+            ? "Rebut Piala: first to step on the gold trophy in the centre wins. "
+            : "Race to the Top: first to the opposite goal row wins. "}
           Turn-based: one action per turn — move or place a blockade — 30 s per turn. WASD / arrows to
           move, drag a grid edge to place a blockade, <b>B</b> for quick place. Blockades cost energy —
           and can never trap a player.

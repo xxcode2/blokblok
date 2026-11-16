@@ -1,7 +1,10 @@
 // Lobby — spec §14: room code, player slots, ready toggles, host Start,
 // countdown. Also used as the matchmaking "searching" screen.
+// Protocol 1.2.0: the lobby carries the arena mode + player count — 2 slots
+// for Race, 2 or 4 for Trophy.
 
 import { useState } from "react";
+import { colorOfIndex, playerLabel, type ArenaMode, type ArenaPlayerCount } from "../game/mode";
 
 export interface LobbyPlayer {
   id: string;
@@ -19,6 +22,10 @@ export interface LobbyProps {
   queuePosition: number | null;
   countdown: number | null;
   error: string | null;
+  /** Arena mode for this room/match (default "race"). */
+  mode?: ArenaMode;
+  /** Player slots in this room: 2, or 4 in trophy mode (default 2). */
+  playerCount?: ArenaPlayerCount;
   onToggleReady: () => void;
   onStart: () => void;
   onLeave: () => void;
@@ -28,7 +35,11 @@ export interface LobbyProps {
 export function Lobby(props: LobbyProps): React.ReactElement {
   const [copied, setCopied] = useState(false);
   const me = props.players.find((p) => p.id === props.myId);
-  const allReady = props.players.length >= 2 && props.players.every((p) => p.ready);
+  const playerCount = props.playerCount ?? 2;
+  const mode: ArenaMode = props.mode ?? "race";
+  const modeLabel = mode === "trophy" ? "🏆 Rebut Piala" : "🏁 Race to the Top";
+  const allReady = props.players.length >= playerCount && props.players.every((p) => p.ready);
+  const emptySlots = Math.max(0, playerCount - props.players.length);
 
   const copyCode = async () => {
     if (!props.roomCode) return;
@@ -44,6 +55,10 @@ export function Lobby(props: LobbyProps): React.ReactElement {
   return (
     <div className="lobby-screen">
       <h2>{props.searching ? "Finding an opponent…" : "Lobby"}</h2>
+      <p className="lobby-mode">
+        {modeLabel} · {playerCount} pemain
+        {mode === "trophy" ? " — first to the centre trophy wins" : " — first to the opposite goal row wins"}
+      </p>
 
       {props.searching ? (
         <div className="lobby-card">
@@ -69,24 +84,26 @@ export function Lobby(props: LobbyProps): React.ReactElement {
             </div>
           )}
           <div className="lobby-slots">
-            {props.players.map((p) => (
+            {props.players.map((p, i) => (
               <div key={p.id} className={`lobby-slot ${p.ready ? "ready" : ""}`}>
-                <span className={`lobby-orb ${p.id === props.players[0]?.id ? "blue" : "red"}`} />
+                <span className={`lobby-orb ${colorOfIndex(i)}`} />
                 <span className="lobby-name">
-                  {p.name}
+                  {playerLabel(i)} · {p.name}
                   {p.isHost ? " 👑 host" : ""}
                   {p.id === props.myId ? " (you)" : ""}
                 </span>
                 <span className="lobby-ready">{p.ready ? "✓ Ready" : "… Not ready"}</span>
               </div>
             ))}
-            {props.players.length < 2 && (
-              <div className="lobby-slot empty">
+            {Array.from({ length: emptySlots }, (_, k) => (
+              <div key={`empty-${k}`} className="lobby-slot empty">
                 <span className="lobby-orb ghost" />
-                <span className="lobby-name">Waiting for opponent…</span>
+                <span className="lobby-name">
+                  {playerLabel(props.players.length + k)} · Waiting for player…
+                </span>
                 <span className="lobby-ready">Share the room code</span>
               </div>
-            )}
+            ))}
           </div>
 
           {props.error && <div className="menu-error">{props.error}</div>}

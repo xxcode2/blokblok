@@ -7,6 +7,7 @@ import { useCallback, useRef, useState } from "react";
 import type { GameEngine, ServerMessage, Snapshot } from "@blockade/core";
 import { GameEngine as Engine } from "@blockade/core";
 import { DEFAULT_SERVER_URL, NetClient, applyDeltaToSnapshot } from "./net";
+import { arenaModeOf, type ArenaMode, type ArenaPlayerCount } from "./game/mode";
 import type { AiDifficulty } from "./ai";
 import { Menu, type MenuChoices } from "./screens/Menu";
 import { Lobby, type LobbyPlayer } from "./screens/Lobby";
@@ -51,6 +52,8 @@ export function App(): React.ReactElement {
   const [roomCode, setRoomCode] = useState<string | null>(null);
   const [lobbyPlayers, setLobbyPlayers] = useState<LobbyPlayer[]>([]);
   const [isHost, setIsHost] = useState(false);
+  const [lobbyMode, setLobbyMode] = useState<ArenaMode>("race");
+  const [lobbyPlayerCount, setLobbyPlayerCount] = useState<ArenaPlayerCount>(2);
   const [searching, setSearching] = useState(false);
   const [queuePosition, setQueuePosition] = useState<number | null>(null);
 
@@ -120,11 +123,15 @@ export function App(): React.ReactElement {
           setRoomCode(msg.roomCode);
           setIsHost(msg.players.find((p) => p.id === net?.playerId)?.isHost ?? false);
           setLobbyPlayers(msg.players);
+          setLobbyMode(msg.mode);
+          setLobbyPlayerCount(msg.playerCount === 4 ? 4 : 2);
           setSearching(false);
           setScreen("lobby");
           break;
         case "lobbyUpdate":
           setLobbyPlayers(msg.players);
+          setLobbyMode(msg.mode);
+          setLobbyPlayerCount(msg.playerCount === 4 ? 4 : 2);
           break;
         case "queued":
           setQueuePosition(msg.position);
@@ -138,9 +145,13 @@ export function App(): React.ReactElement {
         case "matchFound": {
           setSearching(false);
           setRoomCode(msg.roomCode);
+          setLobbyMode(msg.mode);
+          setLobbyPlayerCount(msg.playerCount === 4 ? 4 : 2);
           setLobbyPlayers([
             { id: net?.playerId ?? "me", name: name || "Player", ready: true, isHost: false },
-            { id: msg.opponent.id, name: msg.opponent.name, ready: true, isHost: false },
+            // All other players (1 in 2P, 3 in 4P trophy); the lobby shows
+            // empty slots for anyone not listed yet.
+            ...msg.opponents.map((o) => ({ id: o.id, name: o.name, ready: true, isHost: false })),
           ]);
           setScreen("lobby");
           break;
@@ -173,6 +184,7 @@ export function App(): React.ReactElement {
             stats: msg.stats,
             durationMs: msg.durationMs,
             players: (snapshotRef.current?.players ?? []).map((p) => ({ id: p.id, name: p.name, color: p.color })),
+            mode: arenaModeOf(snapshotRef.current),
           });
           break;
         case "opponentLeft":
@@ -247,9 +259,22 @@ export function App(): React.ReactElement {
   }, [handleServerMessage, name]);
 
   const startPractice = useCallback((c: MenuChoices, diff: AiDifficulty) => {
-    const eng = new Engine({ gridSize: c.gridSize, durationSec: c.durationSec });
-    eng.addPlayer("p1", c.name);
-    eng.addPlayer("p2", `AI · ${diff}`);
+    // 1.2.0: the engine takes the arena mode; the player count is how many
+    // seats are added (2 in race, 2 or 4 in trophy).
+    const eng = new Engine({ gridSize: c.gridSize, durationSec: c.durationSec, mode: c.mode });
+    try {
+      eng.addPlayer("p1", c.name);
+      // vs 1 AI in 2P, vs 3 AI in 4P trophy — every non-human seat is an AI.
+      for (let i = 2; i <= c.playerCount; i++) {
+        eng.addPlayer(`p${i}`, `AI · ${diff} · P${i}`);
+      }
+    } catch {
+      // Only reachable on an invalid combo (e.g. race + 4 players, which
+      // the menu already locks out). Stay on the menu and say so plainly
+      // instead of crashing.
+      setError("That mode + player count is not valid — Race is 2 players, Trophy is 2 or 4.");
+      return;
+    }
     // Turn-based (protocol 1.1.0): start() arms turn 1 (P1) with its 30 s
     // deadline — required before any tickMs/move, otherwise the engine's
     // turn clock is unanchored.
@@ -271,6 +296,7 @@ export function App(): React.ReactElement {
   }, []);
 
   const startLocal2P = useCallback((c: MenuChoices) => {
+    // Local play is Race 2P only (the menu disables it otherwise).
     const eng = new Engine({ gridSize: c.gridSize, durationSec: c.durationSec });
     eng.addPlayer("p1", `${c.name} · P1`);
     eng.addPlayer("p2", `${c.name} · P2`);
@@ -301,10 +327,12 @@ export function App(): React.ReactElement {
       setRematchLabel("Find a new match");
       rankedRef.current = c.ranked;
       setRankedMatch(c.ranked);
+      setLobbyMode(c.mode);
+      setLobbyPlayerCount(c.playerCount);
       const net = await ensureNet();
       if (!net) return;
       setMode("online");
-      net.queue("race", c.gridSize);
+      net.queue(c.mode, c.gridSize, c.playerCount);
       setSearching(true);
       setScreen("lobby");
     },
@@ -318,10 +346,12 @@ export function App(): React.ReactElement {
       setRematchLabel("Create a new room");
       rankedRef.current = c.ranked;
       setRankedMatch(c.ranked);
+      setLobbyMode(c.mode);
+      setLobbyPlayerCount(c.playerCount);
       const net = await ensureNet();
       if (!net) return;
       setMode("online");
-      net.createRoom("race", c.gridSize, c.durationSec);
+      net.createRoom(c.mode, c.gridSize, c.durationSec, c.playerCount);
     },
     [ensureNet],
   );
@@ -333,6 +363,8 @@ export function App(): React.ReactElement {
       setRematchLabel("Create a new room");
       rankedRef.current = c.ranked;
       setRankedMatch(c.ranked);
+      setLobbyMode(c.mode);
+      setLobbyPlayerCount(c.playerCount);
       const net = await ensureNet();
       if (!net) return;
       setMode("online");
@@ -396,6 +428,8 @@ export function App(): React.ReactElement {
           queuePosition={queuePosition}
           countdown={countdown}
           error={error}
+          mode={lobbyMode}
+          playerCount={lobbyPlayerCount}
           onToggleReady={() => {
             const next = !(me?.ready ?? false);
             netRef.current?.setReady(next);

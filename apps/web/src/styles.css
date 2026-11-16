@@ -174,6 +174,25 @@ select:focus {
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-wrap: wrap;
+}
+
+.mode-toggle button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.picker-note {
+  color: var(--muted);
+  font-size: 12px;
+  margin: 0;
+}
+
+.lobby-mode {
+  color: var(--muted);
+  font-size: 14px;
+  text-align: center;
+  margin: -6px 0 4px;
 }
 
 .ranked-points {
@@ -303,6 +322,16 @@ select:focus {
   color: var(--red);
 }
 
+.lobby-orb.green {
+  background: #22c55e;
+  color: #22c55e;
+}
+
+.lobby-orb.amber {
+  background: #f59e0b;
+  color: #f59e0b;
+}
+
 .lobby-orb.ghost {
   background: #334155;
   color: #334155;
@@ -414,6 +443,16 @@ select:focus {
 .hud-player.red .hud-orb-dot {
   background: var(--red);
   box-shadow: 0 0 8px var(--red);
+}
+
+.hud-player.green .hud-orb-dot {
+  background: #22c55e;
+  box-shadow: 0 0 8px #22c55e;
+}
+
+.hud-player.amber .hud-orb-dot {
+  background: #f59e0b;
+  box-shadow: 0 0 8px #f59e0b;
 }
 
 .hud-name {
@@ -550,6 +589,16 @@ select:focus {
   background: rgba(244, 63, 94, 0.18);
 }
 
+.hud-place.green {
+  border-color: #22c55e;
+  background: rgba(34, 197, 94, 0.18);
+}
+
+.hud-place.amber {
+  border-color: #f59e0b;
+  background: rgba(245, 158, 11, 0.18);
+}
+
 .hud-turn {
   display: flex;
   align-items: center;
@@ -588,6 +637,16 @@ select:focus {
 .hud-turn-dot.red {
   background: var(--red);
   box-shadow: 0 0 8px var(--red);
+}
+
+.hud-turn-dot.green {
+  background: #22c55e;
+  box-shadow: 0 0 8px #22c55e;
+}
+
+.hud-turn-dot.amber {
+  background: #f59e0b;
+  box-shadow: 0 0 8px #f59e0b;
 }
 
 .hud-turn-label {

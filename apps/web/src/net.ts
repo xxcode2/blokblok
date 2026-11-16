@@ -2,6 +2,12 @@
 // Speaks the protocol in DEVELOPMENT.md exactly: hello, createRoom, joinRoom,
 // queue, ready, start, input (move/place/placeAuto), ping, reconnect.
 // Auto-reconnects with the session token if the socket drops mid-match.
+//
+// Protocol 1.2.0: createRoom / queue / roomJoined / matchFound carry
+// `mode: "race" | "trophy"` and `playerCount: 2 | 4`; snapshots carry
+// `mode`, `playerCount` and `trophy: { row, col } | null`; the `win` delta
+// and `result` win reason may be "trophy". PROTOCOL_VERSION comes from
+// @blockade/core (1.2.0).
 
 import type {
   ClientMessage,
@@ -40,6 +46,10 @@ export class NetClient {
   connected = false;
   /** True once a match/room is live, until we leave it. */
   inMatch = false;
+  /** Arena mode of the current room, when the server reported it (1.2.0). */
+  roomMode: "race" | "trophy" | null = null;
+  /** Player count of the current room, when the server reported it (1.2.0). */
+  roomPlayerCount: number | null = null;
 
   private ws: WebSocket | null = null;
   private seq = 0;
@@ -107,15 +117,25 @@ export class NetClient {
     }
     if (msg.type === "welcome") {
       this.playerId = msg.playerId;
-    } else if (msg.type === "roomCreated" || msg.type === "matchFound") {
+    } else if (msg.type === "roomCreated") {
       this.token = msg.token;
       this.roomId = msg.roomId;
       this.roomCode = msg.roomCode;
       this.inMatch = true;
+    } else if (msg.type === "matchFound") {
+      this.token = msg.token;
+      this.roomId = msg.roomId;
+      this.roomCode = msg.roomCode;
+      this.inMatch = true;
+      // 1.2.0: matchFound carries the arena mode + player count.
+      this.roomMode = msg.mode;
+      this.roomPlayerCount = msg.playerCount;
     } else if (msg.type === "roomJoined") {
       this.roomId = msg.roomId;
       this.roomCode = msg.roomCode;
       this.inMatch = true;
+      this.roomMode = msg.mode;
+      this.roomPlayerCount = msg.playerCount;
     } else if (msg.type === "pong") {
       this.latencyMs = Math.max(0, Date.now() - msg.t);
       return; // latency is consumed here, not forwarded
@@ -161,6 +181,8 @@ export class NetClient {
     this.manualClose = true;
     this.inMatch = false;
     this.token = null;
+    this.roomMode = null;
+    this.roomPlayerCount = null;
     if (this.reconnectTimer !== null) {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -185,16 +207,17 @@ export class NetClient {
     }
   }
 
-  createRoom(mode: GameMode, gridSize: GridSize, durationSec: number): void {
-    this.send({ type: "createRoom", mode, gridSize, durationSec });
+  createRoom(mode: GameMode, gridSize: GridSize, durationSec: number, playerCount: 2 | 4 = 2): void {
+    // 1.2.0: the room carries mode + playerCount.
+    this.send({ type: "createRoom", mode, gridSize, durationSec, playerCount });
   }
 
   joinRoom(roomCode: string): void {
     this.send({ type: "joinRoom", roomCode: roomCode.trim().toUpperCase() });
   }
 
-  queue(mode: GameMode, gridSize: number): void {
-    this.send({ type: "queue", mode, gridSize });
+  queue(mode: GameMode, gridSize: number, playerCount: 2 | 4 = 2): void {
+    this.send({ type: "queue", mode, gridSize, playerCount });
   }
 
   leaveQueue(): void {
@@ -258,6 +281,8 @@ export function applyDeltaToSnapshot(snap: Snapshot, events: DeltaEvent[]): Snap
     } else if (e.k === "collide") {
       // No state change — the renderer turns this into sparks + a thud.
     } else if (e.k === "win") {
+      // Win reason is "goal" in race, "trophy" in trophy mode (1.2.0) —
+      // either way the match is finished and winnerId is authoritative.
       next.winnerId = e.winnerId;
       next.status = "finished";
     }

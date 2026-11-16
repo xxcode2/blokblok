@@ -24,6 +24,7 @@ import type { AiDifficulty } from "../ai";
 import { chooseAiAction } from "../ai";
 import type { NetClient } from "../net";
 import { BoardRenderer, type Preview } from "../game/render";
+import { arenaModeOf, dirTowardCell, isTrophyMode, playerLabel, trophyCell } from "../game/mode";
 import { extendEdge, isP1MoveKey, isP2MoveKey, joystickDir, keyToDir, pickEdge, swipeDir } from "../game/input";
 import { Hud } from "../components/Hud";
 import { sfx, isMuted, setMuted } from "../sound";
@@ -34,7 +35,9 @@ export interface MatchResult {
   scores: Record<string, number>;
   stats: Record<string, { moves: number; blockades: number }>;
   durationMs: number;
-  players: { id: string; name: string; color: "blue" | "red" }[];
+  players: { id: string; name: string; color: "blue" | "red" | "green" | "amber" }[];
+  /** Arena mode the match was played in ("race" default, "trophy" for Rebut Piala). */
+  mode?: "race" | "trophy";
 }
 
 export interface GameProps {
@@ -105,11 +108,15 @@ export function Game(props: GameProps): React.ReactElement {
       resultSentRef.current = true;
       propsRef.current.onResult({
         winnerId: props.snapshot.winnerId,
-        reason: "goal",
+        // The snapshot carries no win reason; the arena mode tells us which
+        // win it was (trophy capture vs goal row). The server `result`
+        // message (App) carries the authoritative reason when it arrives.
+        reason: isTrophyMode(props.snapshot) ? "trophy" : "goal",
         scores: Object.fromEntries(props.snapshot.players.map((p) => [p.id, p.score])),
         stats: Object.fromEntries(props.snapshot.players.map((p) => [p.id, { moves: 0, blockades: 0 }])),
         durationMs: (props.snapshot.durationSec - props.snapshot.timeLeftMs / 1000) * 1000,
         players: props.snapshot.players.map((p) => ({ id: p.id, name: p.name, color: p.color })),
+        mode: arenaModeOf(props.snapshot),
       });
     }
   }, [props.snapshot]);
@@ -227,7 +234,13 @@ export function Game(props: GameProps): React.ReactElement {
         showFlash("Not your turn yet");
         return;
       }
-      const dir = lastDirRef.current[playerId] ?? (p?.color === "red" ? "down" : "up");
+      // "Ahead" means toward the goal: the opposite row in race mode, the
+      // centre trophy in trophy mode.
+      let dir = lastDirRef.current[playerId] ?? (p?.color === "red" ? "down" : "up");
+      if (p && isTrophyMode(snap)) {
+        const t = trophyCell(snap);
+        if (t) dir = dirTowardCell(p.row, p.col, t.row, t.col);
+      }
       const cost = blockadeCost(length);
       if (p && p.energy < cost) {
         showFlash("Not enough energy ⚡");
@@ -317,11 +330,14 @@ export function Game(props: GameProps): React.ReactElement {
           }
           // AI driver (practice): exactly ONE action per AI turn, ~500 ms
           // after the turn starts. The core AI refuses to act off-turn,
-          // and a successful action passes the turn back to the human.
+          // and a successful action passes the turn on. In trophy 4P there
+          // are THREE AI seats (P2, P3, P4); whichever AI seat is active
+          // gets its one action — the human seat never does.
           if (p.mode === "practice" && p.aiDifficulty) {
             const s = eng.snapshot();
-            const aiId = s.players.find((x) => x.id !== p.myId)?.id;
-            if (aiId && s.status === "playing" && s.activePlayerId === aiId) {
+            const aiIds = s.players.filter((x) => x.id !== p.myId).map((x) => x.id);
+            const aiId = aiIds.includes(s.activePlayerId) ? s.activePlayerId : null;
+            if (aiId && s.status === "playing") {
               const pend = aiPendingRef.current;
               if (!pend || pend.turn !== s.turnNumber) {
                 aiPendingRef.current = { turn: s.turnNumber, at: now, attempts: 0 };
@@ -390,6 +406,7 @@ export function Game(props: GameProps): React.ReactElement {
             stats: engine.stats(),
             durationMs: engine.durationMs(),
             players: s.players.map((x) => ({ id: x.id, name: x.name, color: x.color })),
+            mode: arenaModeOf(s),
           });
           if (s.winnerId === myId) sfx.win();
           else if (s.winnerId) sfx.lose();
@@ -531,20 +548,24 @@ export function Game(props: GameProps): React.ReactElement {
   const snap = snapState ?? currentSnapshot();
 
   // Turn banner (single place — the HUD): whose turn, which turn number.
+  // Always shows the seat label WITH its colour ("Giliran P3 · Turn 5"),
+  // for 2 or 4 players; in practice/online "(kamu)" marks your own turn.
   let turnLabel: string | null = null;
-  let turnColor: "blue" | "red" | null = null;
+  let turnColor: "blue" | "red" | "green" | "amber" | null = null;
   let turnMine = false;
   if (snap && snap.status === "playing" && snap.players.length >= 2) {
-    const active = snap.players.find((p) => p.id === snap.activePlayerId) ?? null;
+    const activeIdx = snap.players.findIndex((p) => p.id === snap.activePlayerId);
+    const active = activeIdx >= 0 ? snap.players[activeIdx] : null;
     if (active) {
       turnColor = active.color;
       turnMine = mode !== "local2p" && active.id === myId;
+      const seat = playerLabel(activeIdx);
       if (mode === "local2p") {
-        turnLabel = `Giliran ${active.color === "blue" ? "P1" : "P2"} · Turn ${snap.turnNumber}`;
+        turnLabel = `Giliran ${seat} · Turn ${snap.turnNumber}`;
       } else if (active.id === myId) {
-        turnLabel = `Giliran kamu · Turn ${snap.turnNumber}`;
+        turnLabel = `Giliran ${seat} (kamu) · Turn ${snap.turnNumber}`;
       } else {
-        turnLabel = `Giliran lawan · Turn ${snap.turnNumber}`;
+        turnLabel = `Giliran ${seat} · Turn ${snap.turnNumber}`;
       }
     }
   }

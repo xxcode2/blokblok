@@ -12,6 +12,7 @@
 
 import type { Edge, PlayerState, Snapshot } from "@blockade/core";
 import { easeOutCubic, MOVE_ANIM_MS, DEPLOY_MS } from "@blockade/core";
+import { arenaModeOf, isTrophyMode, trophyCell, type ArenaMode } from "./mode";
 
 export interface Preview {
   edge: Edge;
@@ -42,12 +43,14 @@ interface Particle {
 const MAX_PARTICLES = 256;
 const TRAIL_LEN = 10;
 
-const COLORS = {
+const COLORS: Record<string, { core: string; mid: string; glow: string; dark: string }> = {
   blue: { core: "#7dd3fc", mid: "#38bdf8", glow: "#0ea5e9", dark: "#0369a1" },
   red: { core: "#fda4af", mid: "#fb7185", glow: "#f43f5e", dark: "#9f1239" },
+  green: { core: "#86efac", mid: "#22c55e", glow: "#16a34a", dark: "#14532d" },
+  amber: { core: "#fcd34d", mid: "#f59e0b", glow: "#d97706", dark: "#78350f" },
 } as const;
 
-function makeOrbSprite(color: keyof typeof COLORS): HTMLCanvasElement {
+function makeOrbSprite(color: string): HTMLCanvasElement {
   const S = 128;
   const c = document.createElement("canvas");
   c.width = S;
@@ -100,8 +103,11 @@ function makeOrbSprite(color: keyof typeof COLORS): HTMLCanvasElement {
 }
 
 export class BoardRenderer {
-  private sprites: Record<"blue" | "red", HTMLCanvasElement>;
+  private sprites: Record<string, HTMLCanvasElement>;
   private bg: HTMLCanvasElement | null = null;
+  /** Arena mode the cached background was built for (goal-row tints are race-only). */
+  private bgMode: ArenaMode | null = null;
+  private mode: ArenaMode = "race";
   private size = 0;
   private dpr = 1;
   private cell = 0;
@@ -122,7 +128,12 @@ export class BoardRenderer {
   private winBurstDoneFor: string | null = null;
 
   constructor() {
-    this.sprites = { blue: makeOrbSprite("blue"), red: makeOrbSprite("red") };
+    this.sprites = {
+      blue: makeOrbSprite("blue"),
+      red: makeOrbSprite("red"),
+      green: makeOrbSprite("green"),
+      amber: makeOrbSprite("amber"),
+    };
     for (let i = 0; i < MAX_PARTICLES; i++) {
       this.particles.push({ x: 0, y: 0, vx: 0, vy: 0, life: 0, maxLife: 1, size: 2, color: "#fff", alive: false });
     }
@@ -162,11 +173,15 @@ export class BoardRenderer {
     grad.addColorStop(1, "#0d1117");
     g.fillStyle = grad;
     g.fillRect(0, 0, cssSize, cssSize);
-    // Goal rows (static base tint; the pulse is drawn live).
-    g.fillStyle = "rgba(34,211,238,0.10)";
-    g.fillRect(this.originX, this.originY, this.cell * gridSize, this.cell);
-    g.fillStyle = "rgba(244,63,94,0.10)";
-    g.fillRect(this.originX, this.originY + this.cell * (gridSize - 1), this.cell * gridSize, this.cell);
+    // Goal rows (race mode only — trophy mode has no goal rows, just the
+    // centre trophy, which is drawn live). Static base tint; the pulse is
+    // drawn live.
+    if (this.mode === "race") {
+      g.fillStyle = "rgba(34,211,238,0.10)";
+      g.fillRect(this.originX, this.originY, this.cell * gridSize, this.cell);
+      g.fillStyle = "rgba(244,63,94,0.10)";
+      g.fillRect(this.originX, this.originY + this.cell * (gridSize - 1), this.cell * gridSize, this.cell);
+    }
     // Grid lines.
     g.strokeStyle = "rgba(148,163,184,0.20)";
     g.lineWidth = 1;
@@ -185,6 +200,7 @@ export class BoardRenderer {
     g.lineWidth = 2;
     g.strokeRect(this.originX - 1, this.originY - 1, this.cell * gridSize + 2, this.cell * gridSize + 2);
     this.bg = bg;
+    this.bgMode = this.mode;
   }
 
   /** Fractional cell coordinates of a point in CSS pixels relative to the canvas. */
@@ -202,6 +218,7 @@ export class BoardRenderer {
   /** Feed the latest authoritative snapshot. Starts glides / bursts on change. */
   setSnapshot(snap: Snapshot, now: number): void {
     this.n = snap.gridSize;
+    this.mode = arenaModeOf(snap);
     const prev = this.prevSnap;
     for (const p of snap.players) {
       const cur = this.display.get(p.id);
@@ -248,6 +265,16 @@ export class BoardRenderer {
         const { x, y } = this.cellCenter(w.row, w.col);
         this.burst(x, y, COLORS[w.color].glow, 60);
         this.burst(x, y, "#ffffff", 30);
+      }
+      // Trophy capture: an extra gold burst on the trophy cell itself.
+      if (isTrophyMode(snap)) {
+        const t = trophyCell(snap);
+        if (t) {
+          const { x, y } = this.cellCenter(t.row, t.col);
+          this.burst(x, y, "#fbbf24", 50);
+          this.burst(x, y, "#f59e0b", 40);
+          this.burst(x, y, "#ffffff", 20);
+        }
       }
     }
     this.prevSnap = snap;
@@ -323,13 +350,29 @@ export class BoardRenderer {
       ctx.translate((Math.random() - 0.5) * m * 2, (Math.random() - 0.5) * m * 2);
     }
     if (this.bg) ctx.drawImage(this.bg, 0, 0, S, S);
+    // The cached background was built for the other mode (race goal-row
+    // tints don't belong in trophy mode) — rebuild it once, off the hot path.
+    if (this.bgMode !== this.mode && this.size > 0) {
+      this.resize(this.size, this.dpr, this.n);
+      if (this.bg) ctx.drawImage(this.bg, 0, 0, S, S);
+    }
 
-    // Goal-row pulse.
-    const pulse = 0.05 + 0.04 * Math.sin(now / 450);
-    ctx.fillStyle = `rgba(34,211,238,${pulse})`;
-    ctx.fillRect(this.originX, this.originY, this.cell * this.n, this.cell);
-    ctx.fillStyle = `rgba(244,63,94,${pulse})`;
-    ctx.fillRect(this.originX, this.originY + this.cell * (this.n - 1), this.cell * this.n, this.cell);
+    // Goal-row pulse (race mode only).
+    if (this.mode === "race") {
+      const pulse = 0.05 + 0.04 * Math.sin(now / 450);
+      ctx.fillStyle = `rgba(34,211,238,${pulse})`;
+      ctx.fillRect(this.originX, this.originY, this.cell * this.n, this.cell);
+      ctx.fillStyle = `rgba(244,63,94,${pulse})`;
+      ctx.fillRect(this.originX, this.originY + this.cell * (this.n - 1), this.cell * this.n, this.cell);
+    }
+
+    // Trophy (trophy mode): gold trophy on the centre cell, glow + idle
+    // pulse + sparkles. The cell stays a normal walkable cell — the trophy
+    // is drawn under the orbs, so a capturing orb covers it.
+    if (this.mode === "trophy") {
+      const t = trophyCell(snap);
+      if (t) this.drawTrophy(ctx, t.row, t.col, now);
+    }
 
     // Blockades (grow-in + glow pulse).
     for (const b of snap.blockades) {
@@ -400,6 +443,126 @@ export class BoardRenderer {
       ctx.fill();
     }
     ctx.globalAlpha = 1;
+  }
+
+  /**
+   * Gold trophy, drawn entirely with canvas paths (no image assets):
+   * cup bowl + handles, stem, base, a star on the bowl, a soft gold glow,
+   * an idle pulse, and orbiting sparkles. Pure function of (row, col, now)
+   * — no allocation, no timers; the rAF loop drives the pulse.
+   */
+  private drawTrophy(ctx: CanvasRenderingContext2D, row: number, col: number, now: number): void {
+    const { x: cx, y: cy } = this.cellCenter(row, col);
+    const pulse = 1 + 0.06 * Math.sin(now / 400);
+    const u = this.cell * 0.42 * pulse;
+    ctx.save();
+    ctx.translate(cx, cy);
+    // Soft gold glow behind the trophy.
+    const glowR = u * 1.25;
+    const glow = ctx.createRadialGradient(0, 0, 0, 0, 0, glowR);
+    const glowA = 0.22 + 0.1 * Math.sin(now / 400);
+    glow.addColorStop(0, `rgba(251,191,36,${glowA})`);
+    glow.addColorStop(1, "rgba(251,191,36,0)");
+    ctx.fillStyle = glow;
+    ctx.beginPath();
+    ctx.arc(0, 0, glowR, 0, Math.PI * 2);
+    ctx.fill();
+    // Gold ring on the cell floor.
+    ctx.strokeStyle = `rgba(245,158,11,${0.45 + 0.2 * Math.sin(now / 400)})`;
+    ctx.lineWidth = Math.max(1, this.cell * 0.03);
+    ctx.beginPath();
+    ctx.ellipse(0, u * 0.52, u * 0.72, u * 0.2, 0, 0, Math.PI * 2);
+    ctx.stroke();
+
+    const gold = ctx.createLinearGradient(0, -u * 0.6, 0, u * 0.55);
+    gold.addColorStop(0, "#fef9c3");
+    gold.addColorStop(0.45, "#fbbf24");
+    gold.addColorStop(1, "#b45309");
+    // Handles (stroked curves on both sides of the bowl).
+    ctx.strokeStyle = "#f59e0b";
+    ctx.lineWidth = u * 0.1;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(-u * 0.48, -u * 0.5);
+    ctx.quadraticCurveTo(-u * 0.92, -u * 0.35, -u * 0.62, -u * 0.02);
+    ctx.quadraticCurveTo(-u * 0.5, u * 0.08, -u * 0.3, -u * 0.02);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(u * 0.48, -u * 0.5);
+    ctx.quadraticCurveTo(u * 0.92, -u * 0.35, u * 0.62, -u * 0.02);
+    ctx.quadraticCurveTo(u * 0.5, u * 0.08, u * 0.3, -u * 0.02);
+    ctx.stroke();
+    // Bowl: wide top, curved sides narrowing to the stem.
+    ctx.fillStyle = gold;
+    ctx.strokeStyle = "#92400e";
+    ctx.lineWidth = Math.max(1, u * 0.04);
+    ctx.beginPath();
+    ctx.moveTo(-u * 0.55, -u * 0.58);
+    ctx.lineTo(u * 0.55, -u * 0.58);
+    ctx.quadraticCurveTo(u * 0.5, -u * 0.05, u * 0.2, u * 0.08);
+    ctx.quadraticCurveTo(0, u * 0.16, -u * 0.2, u * 0.08);
+    ctx.quadraticCurveTo(-u * 0.5, -u * 0.05, -u * 0.55, -u * 0.58);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+    // Bowl rim highlight.
+    ctx.strokeStyle = "rgba(255,255,255,0.85)";
+    ctx.lineWidth = Math.max(1, u * 0.05);
+    ctx.beginPath();
+    ctx.moveTo(-u * 0.5, -u * 0.55);
+    ctx.lineTo(u * 0.5, -u * 0.55);
+    ctx.stroke();
+    // Star on the bowl.
+    const starA = 0.55 + 0.45 * Math.sin(now / 300);
+    ctx.fillStyle = `rgba(255,255,255,${starA.toFixed(2)})`;
+    const sx = 0;
+    const sy = -u * 0.28;
+    const sr = u * 0.16;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy - sr);
+    ctx.lineTo(sx + sr * 0.35, sy - sr * 0.35);
+    ctx.lineTo(sx + sr, sy);
+    ctx.lineTo(sx + sr * 0.35, sy + sr * 0.35);
+    ctx.lineTo(sx, sy + sr);
+    ctx.lineTo(sx - sr * 0.35, sy + sr * 0.35);
+    ctx.lineTo(sx - sr, sy);
+    ctx.lineTo(sx - sr * 0.35, sy - sr * 0.35);
+    ctx.closePath();
+    ctx.fill();
+    // Stem.
+    ctx.fillStyle = "#d97706";
+    ctx.fillRect(-u * 0.09, u * 0.12, u * 0.18, u * 0.26);
+    // Base.
+    const base = ctx.createLinearGradient(0, u * 0.36, 0, u * 0.56);
+    base.addColorStop(0, "#fde68a");
+    base.addColorStop(1, "#92400e");
+    ctx.fillStyle = base;
+    ctx.beginPath();
+    ctx.roundRect(-u * 0.4, u * 0.36, u * 0.8, u * 0.2, u * 0.05);
+    ctx.fill();
+    // Sparkles orbiting the trophy (6, deterministic from `now`).
+    ctx.fillStyle = "#fef08a";
+    for (let i = 0; i < 6; i++) {
+      const ang = (i * Math.PI * 2) / 6 + now / 1400;
+      const rad = u * (0.85 + 0.2 * Math.sin(now / 300 + i * 1.7));
+      const px = Math.cos(ang) * rad;
+      const py = Math.sin(ang) * rad * 0.9 - u * 0.1;
+      const s = u * 0.07 * (0.7 + 0.3 * Math.sin(now / 240 + i * 2.1));
+      const a = 0.35 + 0.6 * Math.abs(Math.sin(now / 300 + i));
+      ctx.globalAlpha = a;
+      ctx.beginPath();
+      ctx.moveTo(px, py - s);
+      ctx.lineTo(px + s * 0.35, py - s * 0.35);
+      ctx.lineTo(px + s, py);
+      ctx.lineTo(px + s * 0.35, py + s * 0.35);
+      ctx.lineTo(px, py + s);
+      ctx.lineTo(px - s * 0.35, py + s * 0.35);
+      ctx.lineTo(px - s, py);
+      ctx.lineTo(px - s * 0.35, py - s * 0.35);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.restore();
   }
 
   private drawOrb(ctx: CanvasRenderingContext2D, p: PlayerState, pos: { row: number; col: number }, now: number): void {
