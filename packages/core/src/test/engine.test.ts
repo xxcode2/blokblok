@@ -90,7 +90,13 @@ test("reaching the goal row wins immediately", () => {
   const s = e.snapshot();
   assert.equal(s.status, "finished");
   assert.equal(s.winnerId, "p1");
-  assert.equal(s.players[0].score, 100 + 2 * Math.floor(s.timeLeftMs / 1000));
+  assert.equal(e.winReason, "goal");
+  // No points any more (protocol 1.3.0): the result is win/lose only.
+  // Match stats survive: P1 moved 12 times, P2 wiggled 11 times.
+  assert.equal(e.stats()["p1"].moves, 12);
+  assert.ok(e.durationMs() >= 0);
+  assert.ok(!("score" in s.players[0]));
+  assert.ok(!e.deltaSince(-1).some((ev) => (ev as { k: string }).k === "score"));
 });
 
 test("blockade blocks crossing, costs energy, and the next turn regains +10", () => {
@@ -157,6 +163,51 @@ test("energy: len 3 costs 35; +10 per turn (no per-second regen); insufficient r
   const r = e.place("p1", { row: 9, col: 2, orientation: "h", len: 1 });
   assert.equal((r as { code: string }).code, "NO_ENERGY");
   assert.equal(e.getPlayer("p1")!.energy, 15);
+});
+
+test("blockade cap: 10 placements per player per match; the 11th is NO_BLOCKADES", () => {
+  const e = twoPlayer();
+  // Energy math per placement round-trip: a len-1 place costs 20, +10 comes
+  // back at the start of the next own turn, so five consecutive placements
+  // take energy 100 -> 50 (the last P2 idle already started P1's next
+  // turn). Five idle turns recharge it to 100 for the second five
+  // (100 -> 50 again). The cap — not energy — must bind on the 11th
+  // attempt (energy is 50, well above the 20 cost).
+  const placeAt = (col: number) => e.place("p1", { row: 5, col, orientation: "h", len: 1 });
+  for (let c = 0; c < 5; c++) {
+    assert.equal(placeAt(c).ok, true);
+    assert.equal(e.snapshot().players[0].blockadesLeft, 10 - (c + 1));
+    idle(e, "p2");
+  }
+  assert.equal(e.getPlayer("p1")!.energy, 50);
+  for (let i = 0; i < 5; i++) {
+    idle(e, "p1");
+    idle(e, "p2");
+  }
+  assert.equal(e.getPlayer("p1")!.energy, 100);
+  for (let c = 5; c < 10; c++) {
+    assert.equal(placeAt(c).ok, true);
+    assert.equal(e.snapshot().players[0].blockadesLeft, 10 - (c + 1));
+    idle(e, "p2");
+  }
+  assert.equal(e.getPlayer("p1")!.energy, 50);
+  assert.equal(e.snapshot().players[0].blockadesLeft, 0);
+  assert.equal(e.stats()["p1"].blockades, 10);
+  // 11th attempt: a fresh, otherwise-valid edge. validatePlace names the cap.
+  assert.equal(e.validatePlace("p1", { row: 5, col: 10, orientation: "h", len: 1 }), "NO_BLOCKADES");
+  const turnBefore = e.snapshot().turnNumber;
+  const r = e.place("p1", { row: 5, col: 10, orientation: "h", len: 1 });
+  assert.equal(r.ok, false);
+  assert.equal((r as { code: string }).code, "NO_BLOCKADES");
+  assert.equal(e.snapshot().activePlayerId, "p1"); // rejected: turn stays
+  assert.equal(e.snapshot().turnNumber, turnBefore);
+  assert.equal(e.getPlayer("p1")!.energy, 50); // no energy spent
+  assert.equal(e.snapshot().players[0].blockadesLeft, 0);
+  // placeAuto is capped the same way (not a generic INVALID_BLOCKADE).
+  const auto = e.placeAuto("p1", "up", "h", 1);
+  assert.equal(auto.ok, false);
+  assert.equal((auto as { code: string }).code, "NO_BLOCKADES");
+  assert.equal(e.snapshot().activePlayerId, "p1");
 });
 
 test("one action per turn: a second placement on the same turn is NOT_YOUR_TURN", () => {

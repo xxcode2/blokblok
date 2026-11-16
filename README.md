@@ -15,7 +15,7 @@ cyan energy blockades.
   movement (one action per turn, 30 s turn timer with auto-pass, +10 energy
   at the start of your turn), blockades, BFS fairness validation, energy,
   Race mode, Trophy mode (centre-cell trophy, 2 or 4 players), AI
-  (Easy/Normal/Hard). Protocol 1.2.0.
+  (Easy/Normal/Hard). Protocol 1.3.0.
   Tests: 56/56 pass.
 - `apps/server` — Node.js + `ws`, server-authoritative 20 ticks/s, rooms by
   6-char code (2P race, 2P/4P trophy), matchmaking queue (groups by mode +

@@ -1,13 +1,18 @@
 // BLOCKADE ARENA — server smoke test (scripted TURN-BASED 1v1 over raw WebSockets).
-// Protocol 1.2.0: one action per turn (move 1 cell OR place 1 blockade),
+// Protocol 1.3.0: one action per turn (move 1 cell OR place 1 blockade),
 // 30 s per turn, +10 energy at the start of your turn, turn 1 belongs to P1.
+// No points: the result is win/lose/draw only (winnerId + reason + stats +
+// durationMs). Blockade cap: 10 per player per match (NO_BLOCKADES).
 // Run with the server already up:  npm start --workspace=@blockade/server
 // then:                                node apps/server/scripts/smoke-test.mjs
 // Expects: hello → createRoom → joinRoom → ready → start → countdown →
-// matchStart (turn 1, P1 active, deadline now+30s) → P1 valid place →
-// P1 out-of-turn move rejected NOT_YOUR_TURN → P2 overlapping place
-// rejected INVALID_BLOCKADE (turn does NOT pass) → alternating turns:
-// P1 walks to the goal row while P2 wiggles → result with P1 as winner.
+// matchStart (turn 1, P1 active, deadline now+30s, 10 blockadesLeft) →
+// P1 valid place → P1 out-of-turn move rejected NOT_YOUR_TURN → P2
+// overlapping place rejected INVALID_BLOCKADE (turn does NOT pass) →
+// P1 places 9 more blockades (10 total, recharging with idle wiggles when
+// energy runs short) → 11th placement rejected NO_BLOCKADES (turn does NOT
+// pass) → alternating turns: P1 walks to the goal row while P2 wiggles →
+// result with P1 as winner, reason goal, stats blockades 10.
 // Also measures tick smoothness: inter-arrival gaps of delta/state
 // broadcasts during play, plus the server's own tick timing from GET /stats.
 import WebSocket from "ws";
@@ -85,7 +90,7 @@ async function main() {
   const wa = await a.waitFor((m) => m.type === "welcome", 5000, "welcome A");
   const wb = await b.waitFor((m) => m.type === "welcome", 5000, "welcome B");
   check(wa.playerId && wb.playerId && wa.playerId !== wb.playerId, "welcome assigns distinct playerIds");
-  check(wa.serverVersion === "1.2.0", `welcome serverVersion is 1.2.0 (got ${wa.serverVersion})`);
+  check(wa.serverVersion === "1.3.0", `welcome serverVersion is 1.3.0 (got ${wa.serverVersion})`);
 
   // ping/pong
   a.send({ type: "ping", t: 123 });
@@ -113,6 +118,7 @@ async function main() {
   check(ms.snapshot.players.length === 2, "matchStart snapshot has 2 players");
   const p1 = ms.snapshot.players.find((p) => p.id === wa.playerId);
   check(p1 && p1.row === 11 && p1.col === 6, "P1 starts bottom centre (11,6)");
+  check(p1 && p1.blockadesLeft === 10, `matchStart: P1 has 10 blockadesLeft (got ${p1 && p1.blockadesLeft})`);
   // Turn-based matchStart: turn 1, P1 active, 30 s deadline.
   check(ms.snapshot.activePlayerId === wa.playerId, "matchStart: turn 1 belongs to P1 (blue)");
   check(ms.snapshot.turnNumber === 1, "matchStart: turnNumber is 1");
@@ -150,9 +156,14 @@ async function main() {
   const err = await b.waitFor((m) => m.type === "error" && m.code === "INVALID_BLOCKADE", 5000, "illegal placement error");
   check(err.code === "INVALID_BLOCKADE", `illegal overlap rejected with INVALID_BLOCKADE (got ${err.code})`);
 
-  // 7. Alternating turns: P1 walks to the goal row while P2 wiggles
-  // left/right on the top row (never reaching its own goal).
-  // P1: up x10 → (1,6), right → (1,7), up → (0,7) goal. P2: wiggle.
+  // 7. Cap drive (real game): P1 places 9 more blockades — 10 total
+  // including turn 1 — on vertical edges at row 5 that never block either
+  // orb's walk, then the 11th placement is rejected NO_BLOCKADES and the
+  // turn does NOT pass. Energy per round-trip: a len-1 place costs 20,
+  // +10 comes back at the start of the next own turn, so places 2..9 run
+  // energy 90 -> 0; turn 19 recharges with a wiggle (10), turn 21 places
+  // the 10th (20 -> 0), turn 23 recharges again (20), and the 11th
+  // attempt on turn 25 is rejected by the cap, not by energy.
   let p2col = 6;
   const p2wiggle = async () => {
     const dir = p2col === 6 ? "left" : "right";
@@ -169,6 +180,37 @@ async function main() {
     "turn 3 delta",
   );
   check(!!turn3, "rejected placement did not pass the turn (turn 3 only after P2's valid move)");
+  let p1col = 6;
+  const p1wiggle = async () => {
+    const dir = p1col === 6 ? "left" : "right";
+    p1col += dir === "left" ? -1 : 1;
+    await sendAndSettle(a, { type: "input", seq: ++seqA, kind: "move", dir });
+  };
+  const capEdges = [2, 3, 4, 5, 6, 7, 8, 9, 10].map((col) => ({ row: 5, col, orientation: "v", len: 1 }));
+  for (let i = 0; i < 8; i++) {
+    await sendAndSettle(a, { type: "input", seq: ++seqA, kind: "place", edge: capEdges[i] });
+    await p2wiggle();
+  }
+  await p1wiggle(); // turn 19: recharge (energy 10)
+  await p2wiggle();
+  await sendAndSettle(a, { type: "input", seq: ++seqA, kind: "place", edge: capEdges[8] }); // 10th, turn 21
+  await p2wiggle();
+  await p1wiggle(); // turn 23: recharge (energy 20)
+  await p2wiggle();
+  a.send({ type: "input", seq: ++seqA, kind: "place", edge: { row: 5, col: 11, orientation: "v", len: 1 } });
+  const capErr = await a.waitFor((m) => m.type === "error" && m.code === "NO_BLOCKADES", 5000, "NO_BLOCKADES error");
+  check(capErr.code === "NO_BLOCKADES", `11th blockade rejected with NO_BLOCKADES (got ${capErr.code})`);
+  // A periodic state snapshot confirms the wire field: 0 blockades left.
+  const cappedState = await a.waitFor(
+    (m) => m.type === "state" && m.snapshot.players.find((p) => p.id === wa.playerId)?.blockadesLeft === 0,
+    5000,
+    "state with blockadesLeft 0",
+  );
+  check(!!cappedState, "snapshot reports blockadesLeft 0 for P1 after 10 placements");
+
+  // 8. Alternating turns: P1 walks to the goal row while P2 wiggles
+  // left/right on the top row (never reaching its own goal).
+  // P1: up x10 → (1,6), right → (1,7), up → (0,7) goal. P2: wiggle.
   for (let i = 0; i < 10; i++) {
     await p1move("up");
     await p2wiggle();
@@ -179,13 +221,15 @@ async function main() {
   const result = await a.waitFor((m) => m.type === "result", 15000, "result");
   check(result.winnerId === wa.playerId, `result winner is P1 (got ${result.winnerId})`);
   check(result.reason === "goal", `result reason is goal (got ${result.reason})`);
-  // Score = 100 + 2 × seconds remaining. The scripted game takes ~4-6 s of
-  // match time (180 s clock), so the expected score is ~448-452.
-  check(result.scores[wa.playerId] > 100, `winner score > 100 (got ${result.scores[wa.playerId]})`);
-  check(result.scores[wb.playerId] === 0, "loser score is 0");
-  notes.push(`  info: winner score ${result.scores[wa.playerId]} (expected ~448-452: 100 + 2 x seconds remaining)`);
+  check(!("scores" in result), "result carries no scores field (protocol 1.3.0)");
+  check(result.stats[wa.playerId].blockades === 10, `winner placed 10 blockades (got ${result.stats[wa.playerId].blockades})`);
+  check(result.stats[wa.playerId].moves === 14, `winner made 14 moves (2 wiggles + 12 to the goal, got ${result.stats[wa.playerId].moves})`);
+  check(
+    typeof result.durationMs === "number" && result.durationMs > 0,
+    `result durationMs is a positive number (got ${result.durationMs})`,
+  );
 
-  // 8. Smoothness: gaps between delta/state broadcasts received during play.
+  // 9. Smoothness: gaps between delta/state broadcasts received during play.
   const play = a.log.filter((e) => (e.msg.type === "delta" || e.msg.type === "state") && e.at >= t0);
   const gaps = [];
   for (let i = 1; i < play.length; i++) gaps.push(play[i].at - play[i - 1].at);
@@ -205,14 +249,14 @@ async function main() {
 
   const health = await (await fetch(`${HTTP}/health`)).json();
   check(health.status === "ok", "GET /health returns ok");
-  check(health.protocol === "1.2.0", `GET /health protocol is 1.2.0 (got ${health.protocol})`);
-  check(health.version === "1.2.0", `GET /health version is 1.2.0 (got ${health.version})`);
+  check(health.protocol === "1.3.0", `GET /health protocol is 1.3.0 (got ${health.protocol})`);
+  check(health.version === "1.3.0", `GET /health version is 1.3.0 (got ${health.version})`);
 
   a.close();
   b.close();
   await sleep(200);
 
-  console.log("BLOCKADE ARENA smoke test — turn-based 1v1 scripted match (protocol 1.2.0)");
+  console.log("BLOCKADE ARENA smoke test — turn-based 1v1 scripted match (protocol 1.3.0)");
   console.log(notes.join("\n"));
   console.log(`broadcast gaps during play: n=${gaps.length} mean=${meanGap.toFixed(1)}ms max=${maxGap}ms stalls(>250ms)=${stalls}`);
   console.log(`total time: ${((Date.now() - t0) / 1000).toFixed(1)}s`);

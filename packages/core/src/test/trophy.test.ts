@@ -1,4 +1,4 @@
-// Trophy mode + 4-player tests (protocol 1.2.0).
+// Trophy mode + 4-player tests (protocol 1.3.0; trophy/4P arrived in 1.2.0).
 // Trophy cell = centre cell (floor(n/2), floor(n/2)); first orb to step onto
 // it wins (reason "trophy"). 4 players only in trophy mode; turns rotate
 // P1→P2→P3→P4→P1; BFS fairness checks EVERY player's path to the trophy.
@@ -103,8 +103,11 @@ test("trophy win: landing on the centre cell wins immediately (reason trophy)", 
   const winEvents = e.deltaSince(-1).filter((ev) => ev.k === "win");
   assert.equal(winEvents.length, 1);
   if (winEvents[0]?.k === "win") assert.equal(winEvents[0].reason, "trophy");
-  // Score: win = 100 + 2 × seconds remaining.
-  assert.equal(s.players[0].score, 100 + 2 * Math.floor(s.timeLeftMs / 1000));
+  // No points any more (protocol 1.3.0): the result is win/lose only.
+  // Match stats survive: P1 moved 5 times to reach the trophy.
+  assert.equal(e.stats()["p1"].moves, 5);
+  assert.ok(!("score" in s.players[0]));
+  assert.ok(!e.deltaSince(-1).some((ev) => (ev as { k: string }).k === "score"));
 });
 
 test("turn rotation: P1→P2→P3→P4→P1, turnNumber increments each pass", () => {

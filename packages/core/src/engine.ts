@@ -1,9 +1,9 @@
 // BLOCKADE ARENA — authoritative game engine (shared by server + web client).
 // Implements GAME_RULES.md exactly: Race to the Top and Trophy modes,
 // edge-model blockades, BFS fairness rule, turn-based energy (+10 at the
-// start of your turn), timer + timeout scoring. One action per turn (move 1
+// start of your turn), timer + timeout winner. One action per turn (move 1
 // cell OR place 1 blockade); a turn lasts 30 s, then auto-passes
-// (protocol 1.2.0). 2 players in race mode, 2 or 4 in trophy mode.
+// (protocol 1.3.0). 2 players in race mode, 2 or 4 in trophy mode.
 // The engine is deterministic and has no I/O; the server ticks it at 20/s,
 // the web client ticks a local copy for practice / local 2P / drag previews.
 
@@ -18,7 +18,6 @@ import {
   MAX_ENERGY,
   MOVE_ANIM_MS,
   PLAYER_COLORS,
-  scoreForOutcome,
   trophyCellFor,
   TURN_DURATION_MS,
   type BlockadeState,
@@ -49,7 +48,6 @@ interface PlayerInternal {
   row: number;
   col: number;
   energy: number;
-  score: number;
   moves: number;
   blockadesPlaced: number;
   /** In-flight move animation: from-cell, to-cell, tick the move landed on. */
@@ -88,7 +86,7 @@ export class GameEngine {
   /** Engine's view of wall-clock time (ms), set by start()/tickAt() and
    *  advanced by tickMs(dt). Turn deadlines are epoch ms on this clock. */
   private currentNowMs = 0;
-  /** Turn state (protocol 1.2.0): one action per turn, 30 s per turn. */
+  /** Turn state (protocol 1.3.0): one action per turn, 30 s per turn. */
   activePlayerId = "";
   turnNumber = 1;
   turnDeadlineMs = 0;
@@ -165,7 +163,6 @@ export class GameEngine {
       row: spawn[idx].row,
       col: spawn[idx].col,
       energy: MAX_ENERGY,
-      score: 0,
       moves: 0,
       blockadesPlaced: 0,
       anim: null,
@@ -420,9 +417,12 @@ export class GameEngine {
     if (this.status !== "playing") return "INVALID_BLOCKADE";
     if (this.activePlayerId !== playerId) return "NOT_YOUR_TURN";
     if (!Number.isInteger(edge.len) || edge.len < 1 || edge.len > MAX_BLOCKADE_LEN) return "INVALID_BLOCKADE";
-    if (this.blockades.filter((b) => b.playerId === playerId).length >= MAX_BLOCKADES_PER_PLAYER) {
-      return "INVALID_BLOCKADE";
-    }
+    // Hard cap: 10 blockades per player per match, counted on placement
+    // (not on active blockades — blockades are permanent, so the counts
+    // only diverge if a cap were ever bypassed). Checked before energy:
+    // a capped player is out of blockades even with energy to spare.
+    // Rejected: the turn does NOT pass and no energy is spent.
+    if (p.blockadesPlaced >= MAX_BLOCKADES_PER_PLAYER) return "NO_BLOCKADES";
     if (blockadeCost(edge.len) > p.energy) return "NO_ENERGY";
     const singles = edgesForBlockade(edge);
     for (const s of singles) {
@@ -515,9 +515,11 @@ export class GameEngine {
           ? "placement would leave a player with no path to their target"
           : err === "NO_ENERGY"
             ? "not enough energy"
-            : err === "NOT_YOUR_TURN"
-              ? "it is not your turn"
-              : "invalid blockade placement";
+            : err === "NO_BLOCKADES"
+              ? "no blockades left this match (max 10 per player)"
+              : err === "NOT_YOUR_TURN"
+                ? "it is not your turn"
+                : "invalid blockade placement";
       return { ok: false, code: err, message };
     }
     const p = this.getPlayer(playerId)!;
@@ -572,6 +574,12 @@ export class GameEngine {
     if (this.status !== "playing") return { ok: false, code: "INVALID_BLOCKADE", message: "match not playing" };
     if (this.activePlayerId !== playerId) {
       return { ok: false, code: "NOT_YOUR_TURN", message: "it is not your turn" };
+    }
+    // Hard cap first: with no blockades left there is nothing to scan for,
+    // and the rejection must carry NO_BLOCKADES (not the generic
+    // "no valid placement ahead" INVALID_BLOCKADE below).
+    if (p.blockadesPlaced >= MAX_BLOCKADES_PER_PLAYER) {
+      return { ok: false, code: "NO_BLOCKADES", message: "no blockades left this match (max 10 per player)" };
     }
     const N = this.gridSize;
     // Candidate anchors at increasing distance d ahead of the player.
@@ -664,14 +672,10 @@ export class GameEngine {
     this.status = "finished";
     this.winnerId = winnerId;
     this.winReason = reason;
-    const secsLeft = Math.floor(this.timeLeftMs / 1000);
-    const events: DeltaEvent[] = [{ k: "win", winnerId, reason, tick: this.tickCount }];
-    for (const p of this.players) {
-      const outcome = winnerId === null ? "draw" : p.id === winnerId ? "win" : "loss";
-      p.score = scoreForOutcome(outcome, outcome === "win" ? secsLeft : 0);
-      events.push({ k: "score", playerId: p.id, score: p.score });
-    }
-    this.record(events);
+    // No points: the result is win/lose/draw only (protocol 1.3.0 removed
+    // the points system). Match stats (moves, blockades placed, duration)
+    // are reported separately via stats() / durationMs().
+    this.record([{ k: "win", winnerId, reason, tick: this.tickCount }]);
   }
 
   private finishByTimeout(): void {
@@ -737,7 +741,7 @@ export class GameEngine {
       row: p.row,
       col: p.col,
       energy: Math.floor(p.energy),
-      score: p.score,
+      blockadesLeft: MAX_BLOCKADES_PER_PLAYER - p.blockadesPlaced,
       progress: this.progress(p),
     };
     // Expose the in-flight animation while it is still running so clients
@@ -806,9 +810,8 @@ export class GameEngine {
         row: ps.row,
         col: ps.col,
         energy: ps.energy,
-        score: ps.score,
         moves: 0,
-        blockadesPlaced: 0,
+        blockadesPlaced: Math.max(0, MAX_BLOCKADES_PER_PLAYER - ps.blockadesLeft),
         anim: ps.anim
           ? {
               fromRow: ps.anim.fromRow,

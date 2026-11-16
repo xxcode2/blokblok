@@ -27,7 +27,8 @@ export interface PlayerState {
   row: number;
   col: number;
   energy: number;
-  score: number;
+  /** Blockades still available this match (10 − blockades placed). */
+  blockadesLeft: number;
   /** 0..1 fraction of the way to the goal row. */
   progress: number;
   /**
@@ -88,7 +89,6 @@ export type DeltaEvent =
   | { k: "blockade"; blockade: BlockadeState }
   | { k: "energy"; playerId: string; energy: number }
   | { k: "timer"; timeLeftMs: number }
-  | { k: "score"; playerId: string; score: number }
   | { k: "turn"; activePlayerId: string; turnNumber: number; turnDeadlineMs: number }
   | { k: "collide"; playerId: string; row: number; col: number; tick: number }
   | { k: "win"; winnerId: string | null; reason: WinReason; tick: number };
@@ -153,7 +153,6 @@ export type ServerMessage =
       type: "result";
       winnerId: string | null;
       reason: WinReason;
-      scores: Record<string, number>;
       stats: Record<string, { moves: number; blockades: number }>;
       durationMs: number;
     }
@@ -172,19 +171,15 @@ export type ErrorCode =
   | "INVALID_BLOCKADE"
   | "NO_PATH"
   | "NO_ENERGY"
+  | "NO_BLOCKADES"
   | "NOT_YOUR_TURN"
   | "NOT_IN_MATCH"
   | "BAD_TOKEN";
 
-export interface MatchScores {
-  scores: Record<string, number>;
-  rankedPoints: Record<string, number>;
-}
-
 // ---------------------------------------------------------------------------
 // Tunables (GAME_RULES.md)
 // ---------------------------------------------------------------------------
-export const PROTOCOL_VERSION = "1.2.0";
+export const PROTOCOL_VERSION = "1.3.0";
 /** One action per turn; a turn lasts 30 s, then auto-passes. */
 export const TURN_DURATION_MS = 30000;
 /** Energy regained at the start of each of your turns (capped at MAX_ENERGY). */
@@ -192,6 +187,7 @@ export const ENERGY_PER_TURN = 10;
 /** Orb glide animation only (ms) — no cooldown: one move per turn. */
 export const MOVE_ANIM_MS = 150;
 export const MAX_ENERGY = 100;
+/** Hard cap: blockades a player may place per match (counted on placement, not active). */
 export const MAX_BLOCKADES_PER_PLAYER = 10;
 export const MAX_BLOCKADE_LEN = 4;
 export const DEFAULT_DURATION_SEC = 180;
@@ -208,13 +204,6 @@ export const PLAYER_COLORS: PlayerColor[] = ["blue", "red", "green", "amber"];
 
 export function blockadeCost(len: number): number {
   return len >= 3 ? 35 : 20;
-}
-
-/** Score for a match outcome. */
-export function scoreForOutcome(outcome: "win" | "draw" | "loss", secondsRemaining: number): number {
-  if (outcome === "win") return 100 + 2 * Math.floor(secondsRemaining);
-  if (outcome === "draw") return 25;
-  return 0;
 }
 
 export const DIRS: Record<Dir, { dr: number; dc: number }> = {

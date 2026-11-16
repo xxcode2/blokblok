@@ -14,7 +14,8 @@ import { RoomManager, type Room } from "./rooms.js";
 import type { MatchHooks } from "./match.js";
 
 const PORT = Number(process.env.PORT ?? 3001);
-// Server version tracks the protocol version (1.2.0, turn-based + trophy/4P): it is
+// Server version tracks the protocol version (1.3.0, turn-based + trophy/4P,
+// no points, 10 blockades per player per match): it is
 // what `welcome.serverVersion` and GET /health report.
 const SERVER_VERSION = PROTOCOL_VERSION;
 const MAX_INPUTS_PER_SEC = 30;
