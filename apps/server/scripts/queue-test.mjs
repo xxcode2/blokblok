@@ -40,6 +40,12 @@ console.log("matchFound B room:", foundB.roomCode, "opponent:", foundB.opponent.
 console.log("same room:", found.roomCode === foundB.roomCode);
 const start = await a.waitFor((m) => m.type === "matchStart", 8000, "auto matchStart");
 console.log("auto matchStart status:", start.snapshot.status, "players:", start.snapshot.players.length);
+if (start.snapshot.status !== "playing" || start.snapshot.players.length !== 2) throw new Error("bad matchStart snapshot");
+// Protocol 1.1.0: turn 1 belongs to the first player, 30 s deadline.
+if (start.snapshot.turnNumber !== 1) throw new Error("expected turnNumber 1 at matchStart, got " + start.snapshot.turnNumber);
+if (!start.snapshot.players.some((p) => p.id === start.snapshot.activePlayerId)) throw new Error("matchStart activePlayerId is not a player");
+if (!(start.snapshot.turnDeadlineMs > Date.now() && start.snapshot.turnDeadlineMs <= Date.now() + 30000)) throw new Error("matchStart turnDeadlineMs is not now+30s");
+console.log("turn 1: activePlayerId", start.snapshot.activePlayerId, "deadline", start.snapshot.turnDeadlineMs);
 a.ws.close();
 b.ws.close();
 await sleep(200);

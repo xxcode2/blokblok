@@ -62,7 +62,7 @@ All ids are strings. All times in ms unless noted.
 | `delta` | `tick: number`, `events: DeltaEvent[]` | Incremental updates between snapshots. |
 | `result` | `winnerId: string \| null, reason: "goal"\|"timeout"\|"forfeit"\|"draw"`, `scores, stats, durationMs` | Match over. |
 | `opponentLeft` | `playerId: string` | Opponent disconnected (match continues vs AI? No — forfeit after 30s grace, see rules). |
-| `error` | `code: string`, `message: string` | Rejected request. Codes: `BAD_REQUEST`, `ROOM_NOT_FOUND`, `ROOM_FULL`, `NOT_READY`, `NOT_HOST`, `INVALID_MOVE`, `INVALID_BLOCKADE`, `NO_PATH`, `NO_ENERGY`, `ON_COOLDOWN`, `NOT_IN_MATCH`, `BAD_TOKEN`. |
+| `error` | `code: string`, `message: string` | Rejected request. Codes: `BAD_REQUEST`, `ROOM_NOT_FOUND`, `ROOM_FULL`, `NOT_READY`, `NOT_HOST`, `INVALID_MOVE`, `INVALID_BLOCKADE`, `NO_PATH`, `NO_ENERGY`, `NOT_YOUR_TURN`, `NOT_IN_MATCH`, `BAD_TOKEN`. |
 
 ### Snapshot (shared type `Snapshot` in `packages/core`)
 ```ts
@@ -73,8 +73,11 @@ interface Snapshot {
   gridSize: number;
   durationSec: number;
   timeLeftMs: number;
+  activePlayerId: string; // whose turn it is (turn 1 = P1, blue)
+  turnNumber: number;     // starts at 1, +1 on every turn pass
+  turnDeadlineMs: number; // epoch ms when the current turn expires (0 = not started)
   players: PlayerState[];   // { id, name, color: "blue"|"red", row, col,
-                             //   energy, moveCooldownMs, placeCooldownMs, score, progress }
+                             //   energy, score, progress }
   blockades: BlockadeState[]; // { id, playerId, edges: Edge[], createdTick }
   winnerId: string | null;
 }
@@ -87,8 +90,15 @@ type DeltaEvent =
   | { k: "blockade"; blockade: BlockadeState }
   | { k: "energy"; playerId: string; energy: number }
   | { k: "timer"; timeLeftMs: number }
-  | { k: "score"; playerId: string; score: number };
+  | { k: "score"; playerId: string; score: number }
+  | { k: "turn"; activePlayerId: string; turnNumber: number; turnDeadlineMs: number }
+  | { k: "collide"; playerId: string; row: number; col: number; tick: number }
+  | { k: "win"; winnerId: string | null; reason: "goal" | "timeout" | "forfeit" | "draw"; tick: number };
 ```
+The `turn` event is emitted on every turn pass — after a valid action and
+on a timeout auto-pass. Protocol version is **1.1.0** (turn-based);
+`GET /health` reports it as both `version` and `protocol`, and `welcome`
+reports it as `serverVersion`.
 
 ## Edge model (shared by every client — get this exactly right)
 
@@ -106,16 +116,28 @@ Cells are `(row, col)`, `0 <= row, col < N`. A blockade sits on **edges between 
 ## Game rules (summary — full rules in GAME_RULES.md)
 - Race to the Top, 1v1. P1 blue starts bottom row centre, goal = row 0. P2 red starts
   top row centre, goal = row `N-1`. First to any goal-row cell wins.
-- Move: 4-dir, one cell per move, 150 ms move cooldown, input buffering (latest wins).
-- Blockade: energy cost 20 (len 1–2) or 35 (len 3+), max energy 100, regen 5/s,
-  placement cooldown 500 ms, max 10 active per player, max length 4.
+- **Turn-based (protocol 1.1.0):** one action per turn — move 1 cell
+  (up/down/left/right) OR place 1 blockade. Turn 1 belongs to P1. After a
+  valid action the turn passes to the other player, `turnNumber += 1`, and
+  the new deadline is now + 30 s (`TURN_DURATION_MS = 30000`). An invalid
+  action is rejected (`INVALID_MOVE` / `INVALID_BLOCKADE` / `NO_PATH` /
+  `NO_ENERGY`, or `NOT_YOUR_TURN` out of turn) and the turn does NOT pass.
+  If the active player does not act within 30 s, the turn auto-passes with
+  no other penalty. There are NO move/place cooldowns and NO input buffering
+  any more (removed in the 1.1.0 revision); `MOVE_ANIM_MS = 150` is now an
+  animation-only constant (orb glide duration).
+- Blockade: energy cost 20 (len 1–2) or 35 (len 3+), max energy 100,
+  **+10 energy at the start of each of your turns** (`ENERGY_PER_TURN = 10`,
+  capped at 100; no per-second regen), max 10 active per player, max length 4.
 - **BFS fairness rule:** a placement is rejected if, after placing it, EITHER player
   has no BFS path to their goal row. This is enforced in the core engine AND on the
   server. Never allow a softlock.
 - Timer default 180 s. On timeout, the player closer to their goal (fewest rows away)
   wins; equal distance = draw.
-- Server tick 20/s. Server is authoritative: it validates every input, simulates,
-  and broadcasts. Clients never send state, only inputs.
+- Server tick 20/s. Server is authoritative: it validates every input, enforces
+  the turn (`NOT_YOUR_TURN` on every `input` before applying), simulates,
+  and broadcasts. The 20/s tick loop drives the engine tick, so 30 s turn
+  timeouts fire on the server. Clients never send state, only inputs.
 
 ## How to run (milestone 1)
 
@@ -131,27 +153,35 @@ npm run dev --workspace=@blockade/web       # web on http://localhost:5173
 ## What works (milestone 1)
 - Core engine: grid/edge model, movement, blockades, BFS validation, energy,
   Race mode, timer, scoring, AI (Easy/Normal/Hard), protocol types. Unit tests pass.
-  - Animation support in the engine: `tryMove` buffers inputs during the
-    move cooldown (latest wins, so holding a direction glides instead of
-    stuttering); `PlayerState.anim` carries the in-flight move (from→to,
-    startTick, durationMs) and `BlockadeState.placedTick/deployDurationMs`
-    carry the grow-in window; `interpolatedPosition()` /
-    `blockadeDeployProgress()` give clients eased 0..1 progress. Delta
-    events include `collide` (illegal move feedback) and `win`.
+  Turn-based since protocol 1.1.0 (2026-11-16): one action per turn, 30 s
+  turn timer with auto-pass, +10 energy at the start of your turn, no
+  cooldowns, no input buffering. `chooseAiAction` picks a single
+  move-or-blockade action per AI turn.
+  - Animation support in the engine: `PlayerState.anim` carries the in-flight
+    move (from→to, startTick, durationMs) and `BlockadeState.placedTick/
+    deployDurationMs` carry the grow-in window; `interpolatedPosition()` /
+    `blockadeDeployProgress()` give clients eased 0..1 progress. Orbs glide
+    cell to cell in 150 ms with easeOutCubic, blockades grow in over 250 ms.
+    Delta events include `collide` (illegal move feedback), `turn` (every
+    turn pass) and `win`.
   - Engine note: the tick counter field is `tickCount` (the `tick(nowMs)`
     wall-clock entry point owns the name `tick`).
 - Server: authoritative 20-tick sim, rooms by 6-char code, 1v1 matchmaking queue,
   reconnect tokens, snapshots + deltas, match results (in-memory).
-  - Verified 2026-11-16 (Track 1, live server on :3001):
-    `apps/server/scripts/smoke-test.mjs` PASSED — scripted 1v1: hello, ping/pong,
-    createRoom (6-char code), joinRoom, ready, start, countdown 3s, matchStart,
-    valid place → blockade delta, overlapping place → `INVALID_BLOCKADE`, P1
-    walks to the goal row → `result` winner P1, reason `goal`, score 452.
-    Smoothness: 67 delta/state broadcasts, mean gap 48.0 ms, max 52 ms,
-    0 stalls (>250 ms); server tick processing avg 0.44 ms, max 3.34 ms
-    (20/s budget is 50 ms). `queue-test.mjs` PASSED (queue → matchFound same
-    room code → auto matchStart). `reconnect-test.mjs` PASSED (drop mid-match
-    → reconnect with token → `reconnected` with live snapshot; bad token →
+  - Verified 2026-11-16 (Track 1, live server on :3001, protocol 1.1.0):
+    `apps/server/scripts/smoke-test.mjs` PASSED — turn-based scripted 1v1:
+    hello, ping/pong, createRoom (6-char code), joinRoom, ready, start,
+    countdown 3s, matchStart (turn 1, P1 active, deadline now+30s), P1 valid
+    place → blockade + `turn` deltas, P1 out-of-turn move → `NOT_YOUR_TURN`,
+    P2 overlapping place → `INVALID_BLOCKADE` (turn does not pass), then
+    alternating turns (P1 walks up, P2 wiggles) until P1 reaches the goal
+    row → `result` winner P1, reason `goal`, score ~448-452 (100 + 2 ×
+    seconds remaining).
+    Smoothness (fresh 1.1.0 run): 64 delta/state broadcasts, mean gap 47.8 ms,
+    max 52 ms, 0 stalls (>250 ms); server tick processing avg 0.48 ms,
+    max 3.52 ms (20/s budget is 50 ms). Winner score in that run: 452.
+    room code → auto matchStart, turn 1 checked). `reconnect-test.mjs` PASSED (drop mid-match
+    → reconnect with token → `reconnected` with live snapshot incl. turn state; bad token →
     `BAD_TOKEN`). One bug found + fixed during verification: `reconnect` was
     rejected by the hello-gate because it arrives as the first message on a
     fresh socket — it now authenticates via token before the gate.

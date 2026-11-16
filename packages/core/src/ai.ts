@@ -70,6 +70,9 @@ function bestBlockingPlacement(engine: GameEngine, me: string, foe: string): Edg
 }
 
 export function chooseAiAction(engine: GameEngine, playerId: string, difficulty: AiDifficulty): AiAction | null {
+  // Turn model (protocol 1.1.0): the AI acts only on its own turn, picking
+  // exactly ONE move-or-blockade action per call (one per AI turn).
+  if (!engine.isActivePlayer(playerId)) return null;
   const foe = engine.snapshot().players.find((p) => p.id !== playerId);
   if (!foe) return null;
   const me = engine.getPlayer(playerId)!;

@@ -48,6 +48,10 @@ await new Promise((r) => a2.ws.on("open", r));
 a2.send({ type: "reconnect", token: created.token });
 const re = await a2.waitFor((m) => m.type === "reconnected", 5000, "reconnected");
 console.log("reconnected snapshot status:", re.snapshot.status, "players:", re.snapshot.players.length);
+// Protocol 1.1.0: the live snapshot still carries the turn state.
+if (re.snapshot.turnNumber !== 1) throw new Error("expected turnNumber 1 in reconnected snapshot, got " + re.snapshot.turnNumber);
+if (!re.snapshot.activePlayerId) throw new Error("reconnected snapshot has no activePlayerId");
+console.log("reconnected turn:", re.snapshot.turnNumber, "active:", re.snapshot.activePlayerId);
 // A bad token must be rejected.
 const a3 = client();
 await new Promise((r) => a3.ws.on("open", r));

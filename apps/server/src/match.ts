@@ -111,6 +111,12 @@ export class Match {
     const msg = input.msg;
     const sendError = (code: string, message: string) =>
       this.hooks.send(playerId, { type: "error", code, message });
+    // Authoritative turn enforcement (protocol 1.1.0): only the active
+    // player may act, and only once per turn. The engine enforces this too;
+    // the check here rejects out-of-turn inputs before they reach it.
+    if (this.engine.activePlayerId !== playerId) {
+      return sendError("NOT_YOUR_TURN", "it is not your turn");
+    }
     if (msg.kind === "move") {
       const res = this.engine.tryMove(playerId, msg.dir as Dir);
       if (!res.ok) sendError(res.error, res.message);

@@ -1,6 +1,8 @@
 // BLOCKADE ARENA — authoritative game engine (shared by server + web client).
 // Implements GAME_RULES.md exactly: Race to the Top, edge-model blockades,
-// BFS fairness rule, energy/cooldowns, timer + timeout scoring.
+// BFS fairness rule, turn-based energy (+10 at the start of your turn),
+// timer + timeout scoring. One action per turn (move 1 cell OR place 1
+// blockade); a turn lasts 30 s, then auto-passes (protocol 1.1.0).
 // The engine is deterministic and has no I/O; the server ticks it at 20/s,
 // the web client ticks a local copy for practice / local 2P / drag previews.
 
@@ -9,13 +11,13 @@ import {
   DIRS,
   edgeKey,
   edgesForBlockade,
-  ENERGY_REGEN_PER_SEC,
+  ENERGY_PER_TURN,
   MAX_BLOCKADES_PER_PLAYER,
   MAX_BLOCKADE_LEN,
   MAX_ENERGY,
-  MOVE_COOLDOWN_MS,
-  PLACE_COOLDOWN_MS,
+  MOVE_ANIM_MS,
   scoreForOutcome,
+  TURN_DURATION_MS,
   type BlockadeState,
   type DeltaEvent,
   type Dir,
@@ -42,21 +44,15 @@ interface PlayerInternal {
   row: number;
   col: number;
   energy: number;
-  moveCooldownMs: number;
-  placeCooldownMs: number;
   score: number;
   moves: number;
   blockadesPlaced: number;
-  /** Latest direction received during the move cooldown; applied when it ends. */
-  bufferedDir: Dir | null;
   /** In-flight move animation: from-cell, to-cell, tick the move landed on. */
   anim: { fromRow: number; fromCol: number; toRow: number; toCol: number; startTick: number } | null;
 }
 
 let blockadeSeq = 0;
 
-/** Move animation length (ms) — one cell per move cooldown, eased, never a teleport. */
-export const MOVE_ANIM_MS = MOVE_COOLDOWN_MS;
 /** Blockade deployment (grow-in) length in ms. */
 export const DEPLOY_MS = 250;
 
@@ -84,6 +80,13 @@ export class GameEngine {
   /** Monotonic engine clock (ms), advanced by tickMs. Animations key off ticks. */
   private clockMs = 0;
   private lastTickMs = 0;
+  /** Engine's view of wall-clock time (ms), set by start()/tickAt() and
+   *  advanced by tickMs(dt). Turn deadlines are epoch ms on this clock. */
+  private currentNowMs = 0;
+  /** Turn state (protocol 1.1.0): one action per turn, 30 s per turn. */
+  activePlayerId = "";
+  turnNumber = 1;
+  turnDeadlineMs = 0;
   /** Delta events since the last drainDeltas() (server broadcasts these). */
   private pendingEvents: DeltaEvent[] = [];
   /** Retained events for deltaSince() (ring, capped). */
@@ -136,15 +139,14 @@ export class GameEngine {
       row: idx === 0 ? this.gridSize - 1 : 0,
       col: centre,
       energy: MAX_ENERGY,
-      moveCooldownMs: 0,
-      placeCooldownMs: 0,
       score: 0,
       moves: 0,
       blockadesPlaced: 0,
-      bufferedDir: null,
       anim: null,
     };
     this.players.push(p);
+    // Turn 1 belongs to P1 (blue) as soon as the first player exists.
+    if (idx === 0) this.activePlayerId = id;
     return this.playerState(p);
   }
 
@@ -157,30 +159,59 @@ export class GameEngine {
     if (this.status === "lobby") this.status = "countdown";
   }
 
-  /** Start the match clock. Safe to call when status is already "playing". */
+  /** Start the match clock. Safe to call when status is already "playing".
+   *  Turn 1 belongs to P1 (blue) with a 30 s deadline. */
   start(nowMs: number): void {
     this.status = "playing";
     this.elapsedMs = 0;
     this.timeLeftMs = this.durationSec * 1000;
     this.lastTickMs = nowMs;
-    for (const p of this.players) {
-      p.moveCooldownMs = 0;
-      p.placeCooldownMs = 0;
-      p.bufferedDir = null;
-    }
+    this.currentNowMs = nowMs;
+    this.activePlayerId = this.players[0]?.id ?? "";
+    this.turnNumber = 1;
+    this.turnDeadlineMs = nowMs + TURN_DURATION_MS;
   }
 
   /**
    * Wall-clock tick entry point (server: 20/s). Advances the simulation by
    * the real elapsed time since the previous tick and returns the delta
-   * events for this tick. Also applies buffered moves whose cooldown ended.
+   * events for this tick. Turn timeouts are checked against `nowMs`
+   * (epoch ms), so a turn auto-passes even if ticks were delayed.
    * (Named tickAt because `tick` is already the engine's tick counter.)
    */
   tickAt(nowMs: number): DeltaEvent[] {
     const dt = this.lastTickMs > 0 ? Math.min(250, Math.max(0, nowMs - this.lastTickMs)) : 50;
     this.lastTickMs = nowMs;
     if (this.status !== "playing") return [];
-    return this.tickMs(dt);
+    return this.tickMs(dt, nowMs);
+  }
+
+  /**
+   * Pass the turn to the other player: they gain +10 energy (capped at 100)
+   * at the start of their turn, turnNumber += 1, and the new deadline is
+   * `deadlineMs + 30000` (for a timeout pass, the previous deadline keeps
+   * the schedule; for an action pass, the caller passes now + 30000).
+   * Emits a `turn` delta event (plus an `energy` event when energy changed).
+   */
+  private passTurn(deadlineMs: number): DeltaEvent[] {
+    const next = this.players.find((q) => q.id !== this.activePlayerId);
+    if (!next) return [];
+    this.activePlayerId = next.id;
+    this.turnNumber += 1;
+    this.turnDeadlineMs = deadlineMs;
+    const events: DeltaEvent[] = [{ k: "turn", activePlayerId: next.id, turnNumber: this.turnNumber, turnDeadlineMs: this.turnDeadlineMs }];
+    const before = next.energy;
+    next.energy = Math.min(MAX_ENERGY, next.energy + ENERGY_PER_TURN);
+    if (Math.floor(next.energy) !== Math.floor(before)) {
+      events.push({ k: "energy", playerId: next.id, energy: Math.floor(next.energy) });
+    }
+    this.record(events);
+    return events;
+  }
+
+  /** Is it this player's turn? (Unknown players are never "active".) */
+  isActivePlayer(playerId: string): boolean {
+    return this.status === "playing" && this.activePlayerId === playerId;
   }
 
   goalRow(p: PlayerInternal): number {
@@ -327,8 +358,8 @@ export class GameEngine {
     const p = this.getPlayer(playerId);
     if (!p) return "NOT_IN_MATCH";
     if (this.status !== "playing") return "INVALID_BLOCKADE";
+    if (this.activePlayerId !== playerId) return "NOT_YOUR_TURN";
     if (!Number.isInteger(edge.len) || edge.len < 1 || edge.len > MAX_BLOCKADE_LEN) return "INVALID_BLOCKADE";
-    if (p.placeCooldownMs > 0) return "ON_COOLDOWN";
     if (this.blockades.filter((b) => b.playerId === playerId).length >= MAX_BLOCKADES_PER_PLAYER) {
       return "INVALID_BLOCKADE";
     }
@@ -355,7 +386,9 @@ export class GameEngine {
     const p = this.getPlayer(playerId);
     if (!p) return { ok: false, code: "NOT_IN_MATCH", message: "player not in match" };
     if (this.status !== "playing") return { ok: false, code: "INVALID_MOVE", message: "match not playing" };
-    if (p.moveCooldownMs > 0) return { ok: false, code: "ON_COOLDOWN", message: "move on cooldown" };
+    if (this.activePlayerId !== playerId) {
+      return { ok: false, code: "NOT_YOUR_TURN", message: "it is not your turn" };
+    }
     const { dr, dc } = DIRS[dir];
     const nr = p.row + dr;
     const nc = p.col + dc;
@@ -380,33 +413,31 @@ export class GameEngine {
     p.row = nr;
     p.col = nc;
     p.moves++;
-    p.moveCooldownMs = MOVE_COOLDOWN_MS;
     const events: DeltaEvent[] = [{ k: "move", playerId, row: nr, col: nc, tick: this.tickCount }];
     this.record(events);
     if (nr === this.goalRow(p)) {
       this.finish(p.id, "goal");
+    } else {
+      // One action per turn: a valid move passes the turn to the opponent.
+      // passTurn records its own `turn` (+`energy`) delta events.
+      this.passTurn(this.currentNowMs + TURN_DURATION_MS);
     }
     return { ok: true, events };
   }
 
   /**
-   * Task-spec move entry point: inputs arriving during the move cooldown are
-   * BUFFERED (latest wins) and applied by tick() when the cooldown ends,
-   * instead of being rejected — holding a direction glides smoothly instead
-   * of stuttering. Returns {ok, buffered} for a buffered input.
+   * Turn-model move entry point (no buffering, no cooldown): exactly one
+   * action per turn; an out-of-turn or illegal move is rejected and the
+   * turn does NOT pass.
    */
   tryMove(
     playerId: string,
     dir: Dir,
     _nowMs?: number,
-  ): { ok: true; buffered?: boolean } | { ok: false; error: string; message: string } {
+  ): { ok: true } | { ok: false; error: string; message: string } {
     const p = this.getPlayer(playerId);
     if (!p) return { ok: false, error: "NOT_IN_MATCH", message: "player not in match" };
     if (this.status !== "playing") return { ok: false, error: "NOT_IN_MATCH", message: "match not playing" };
-    if (p.moveCooldownMs > 0) {
-      p.bufferedDir = dir;
-      return { ok: true, buffered: true };
-    }
     const res = this.move(playerId, dir);
     return res.ok ? { ok: true } : { ok: false, error: res.code, message: res.message };
   }
@@ -419,8 +450,8 @@ export class GameEngine {
           ? "placement would leave a player with no path to their goal"
           : err === "NO_ENERGY"
             ? "not enough energy"
-            : err === "ON_COOLDOWN"
-              ? "placement on cooldown"
+            : err === "NOT_YOUR_TURN"
+              ? "it is not your turn"
               : "invalid blockade placement";
       return { ok: false, code: err, message };
     }
@@ -440,13 +471,15 @@ export class GameEngine {
     for (const s of singles) this.blocked.add(edgeKey(s));
     this.blockades.push(blockade);
     p.energy -= blockadeCost(edge.len);
-    p.placeCooldownMs = PLACE_COOLDOWN_MS;
     p.blockadesPlaced++;
     const events: DeltaEvent[] = [
       { k: "blockade", blockade },
       { k: "energy", playerId, energy: p.energy },
     ];
     this.record(events);
+    // One action per turn: a valid placement passes the turn to the opponent.
+    // passTurn records its own `turn` (+`energy`) delta events.
+    this.passTurn(this.currentNowMs + TURN_DURATION_MS);
     return { ok: true, events };
   }
 
@@ -471,6 +504,10 @@ export class GameEngine {
   placeAuto(playerId: string, dir: Dir, orientation: Orientation, len: number): EngineResult {
     const p = this.getPlayer(playerId);
     if (!p) return { ok: false, code: "NOT_IN_MATCH", message: "player not in match" };
+    if (this.status !== "playing") return { ok: false, code: "INVALID_BLOCKADE", message: "match not playing" };
+    if (this.activePlayerId !== playerId) {
+      return { ok: false, code: "NOT_YOUR_TURN", message: "it is not your turn" };
+    }
     const N = this.gridSize;
     // Candidate anchors at increasing distance d ahead of the player.
     for (let d = 0; d < N; d++) {
@@ -527,36 +564,25 @@ export class GameEngine {
   }
 
   // -- simulation ---------------------------------------------------------------
-  /** Advance the simulation by dtMs (server ticks at 50ms; local client per frame). */
-  tickMs(dtMs: number): DeltaEvent[] {
+  /** Advance the simulation by dtMs (server ticks at 50ms; local client per frame).
+   *  `nowMs` (epoch ms, supplied by tickAt) drives turn-timeout checks; when
+   *  omitted the engine's internal clock advances by dtMs instead. There is
+   *  no per-second energy regen and no cooldown/buffer handling any more:
+   *  energy is regained only as +10 at the start of each of your turns
+   *  (passTurn), and a turn auto-passes after 30 s of inactivity. */
+  tickMs(dtMs: number, nowMs?: number): DeltaEvent[] {
     if (this.status !== "playing") return [];
     this.tickCount++;
     this.clockMs += dtMs;
     this.elapsedMs += dtMs;
     this.timeLeftMs = Math.max(0, this.durationSec * 1000 - this.elapsedMs);
-    // Events this tick itself generates (energy/timer). Buffered-move events
-    // are recorded inside move() — they are returned here, not re-recorded.
+    this.currentNowMs = nowMs !== undefined ? nowMs : this.currentNowMs + dtMs;
     const ownEvents: DeltaEvent[] = [];
-    const moveEvents: DeltaEvent[] = [];
-    for (const p of this.players) {
-      p.moveCooldownMs = Math.max(0, p.moveCooldownMs - dtMs);
-      p.placeCooldownMs = Math.max(0, p.placeCooldownMs - dtMs);
-      const before = p.energy;
-      p.energy = Math.min(MAX_ENERGY, p.energy + (ENERGY_REGEN_PER_SEC * dtMs) / 1000);
-      if (Math.floor(p.energy) !== Math.floor(before)) {
-        ownEvents.push({ k: "energy", playerId: p.id, energy: Math.floor(p.energy) });
-      }
-    }
-    // Apply buffered moves whose cooldown has now ended (one per player per
-    // tick — the next buffered input waits for the next cooldown window, so
-    // held directions glide cell-by-cell instead of queue-jumping).
-    for (const p of this.players) {
-      if (p.bufferedDir !== null && p.moveCooldownMs <= 0) {
-        const dir = p.bufferedDir;
-        p.bufferedDir = null;
-        const res = this.move(p.id, dir);
-        if (res.ok) moveEvents.push(...res.events);
-        if (this.status !== "playing") break;
+    // Turn timeout: auto-pass with no other penalty. The deadline advances
+    // by 30 s per pass, so a long stall passes the turn repeatedly.
+    if (this.turnDeadlineMs > 0) {
+      while (this.status === "playing" && this.currentNowMs >= this.turnDeadlineMs) {
+        this.passTurn(this.turnDeadlineMs + TURN_DURATION_MS);
       }
     }
     if (this.timeLeftMs <= 0) {
@@ -566,7 +592,7 @@ export class GameEngine {
       ownEvents.push({ k: "timer", timeLeftMs: this.timeLeftMs });
     }
     this.record(ownEvents);
-    return [...moveEvents, ...ownEvents];
+    return ownEvents;
   }
 
   private finish(winnerId: string | null, reason: "goal" | "timeout" | "forfeit" | "draw"): void {
@@ -644,8 +670,6 @@ export class GameEngine {
       row: p.row,
       col: p.col,
       energy: Math.floor(p.energy),
-      moveCooldownMs: p.moveCooldownMs,
-      placeCooldownMs: p.placeCooldownMs,
       score: p.score,
       progress: this.progress(p),
     };
@@ -675,6 +699,9 @@ export class GameEngine {
       gridSize: this.gridSize,
       durationSec: this.durationSec,
       timeLeftMs: this.timeLeftMs,
+      activePlayerId: this.activePlayerId,
+      turnNumber: this.turnNumber,
+      turnDeadlineMs: this.turnDeadlineMs,
       players: this.players.map((p) => this.playerState(p)),
       blockades: this.blockades.map((b) => ({ ...b, edges: b.edges.map((e) => ({ ...e })) })),
       winnerId: this.winnerId,
@@ -699,6 +726,9 @@ export class GameEngine {
     eng.status = snap.status;
     eng.timeLeftMs = snap.timeLeftMs;
     eng.winnerId = snap.winnerId;
+    eng.activePlayerId = snap.activePlayerId;
+    eng.turnNumber = snap.turnNumber;
+    eng.turnDeadlineMs = snap.turnDeadlineMs;
     for (const ps of snap.players) {
       const p: PlayerInternal = {
         id: ps.id,
@@ -707,12 +737,9 @@ export class GameEngine {
         row: ps.row,
         col: ps.col,
         energy: ps.energy,
-        moveCooldownMs: ps.moveCooldownMs,
-        placeCooldownMs: ps.placeCooldownMs,
         score: ps.score,
         moves: 0,
         blockadesPlaced: 0,
-        bufferedDir: null,
         anim: ps.anim
           ? {
               fromRow: ps.anim.fromRow,

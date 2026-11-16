@@ -25,8 +25,6 @@ export interface PlayerState {
   row: number;
   col: number;
   energy: number;
-  moveCooldownMs: number;
-  placeCooldownMs: number;
   score: number;
   /** 0..1 fraction of the way to the goal row. */
   progress: number;
@@ -68,6 +66,12 @@ export interface Snapshot {
   gridSize: number;
   durationSec: number;
   timeLeftMs: number;
+  /** Player whose turn it is (turn 1 belongs to P1, blue). */
+  activePlayerId: string;
+  /** Turn number, starting at 1. Increments on every turn pass. */
+  turnNumber: number;
+  /** Epoch ms when the current turn expires (auto-pass on timeout). 0 = not started. */
+  turnDeadlineMs: number;
   players: PlayerState[];
   blockades: BlockadeState[];
   winnerId: string | null;
@@ -79,6 +83,7 @@ export type DeltaEvent =
   | { k: "energy"; playerId: string; energy: number }
   | { k: "timer"; timeLeftMs: number }
   | { k: "score"; playerId: string; score: number }
+  | { k: "turn"; activePlayerId: string; turnNumber: number; turnDeadlineMs: number }
   | { k: "collide"; playerId: string; row: number; col: number; tick: number }
   | { k: "win"; winnerId: string | null; reason: "goal" | "timeout" | "forfeit" | "draw"; tick: number };
 
@@ -145,7 +150,7 @@ export type ErrorCode =
   | "INVALID_BLOCKADE"
   | "NO_PATH"
   | "NO_ENERGY"
-  | "ON_COOLDOWN"
+  | "NOT_YOUR_TURN"
   | "NOT_IN_MATCH"
   | "BAD_TOKEN";
 
@@ -157,11 +162,14 @@ export interface MatchScores {
 // ---------------------------------------------------------------------------
 // Tunables (GAME_RULES.md)
 // ---------------------------------------------------------------------------
-export const PROTOCOL_VERSION = "1.0.0";
-export const MOVE_COOLDOWN_MS = 150;
-export const PLACE_COOLDOWN_MS = 500;
+export const PROTOCOL_VERSION = "1.1.0";
+/** One action per turn; a turn lasts 30 s, then auto-passes. */
+export const TURN_DURATION_MS = 30000;
+/** Energy regained at the start of each of your turns (capped at MAX_ENERGY). */
+export const ENERGY_PER_TURN = 10;
+/** Orb glide animation only (ms) — no cooldown: one move per turn. */
+export const MOVE_ANIM_MS = 150;
 export const MAX_ENERGY = 100;
-export const ENERGY_REGEN_PER_SEC = 5;
 export const MAX_BLOCKADES_PER_PLAYER = 10;
 export const MAX_BLOCKADE_LEN = 4;
 export const DEFAULT_DURATION_SEC = 180;

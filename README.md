@@ -11,9 +11,11 @@ cyan energy blockades.
 
 ## Status (milestone 1, 2026-11-16)
 
-- `packages/core` — shared TypeScript engine: grid/edge model, movement,
-  blockades, BFS fairness validation, energy, Race mode, AI (Easy/Normal/Hard).
-  Tests: 38/38 pass.
+- `packages/core` — shared TypeScript engine: grid/edge model, turn-based
+  movement (one action per turn, 30 s turn timer with auto-pass, +10 energy
+  at the start of your turn), blockades, BFS fairness validation, energy,
+  Race mode, AI (Easy/Normal/Hard). Protocol 1.1.0.
+  Tests: 42/42 pass.
 - `apps/server` — Node.js + `ws`, server-authoritative 20 ticks/s, rooms by
   6-char code, 1v1 matchmaking queue, reconnect tokens, in-memory results.
 - `apps/web` — React + Vite + Canvas. Menu, lobby, online 1v1, practice vs AI,
@@ -28,7 +30,7 @@ Full honest status, protocol and rules: [DEVELOPMENT.md](DEVELOPMENT.md),
 
 ```bash
 npm install
-npm run test --workspace=@blockade/core     # 38 unit tests
+npm run test --workspace=@blockade/core     # 42 unit tests
 npm run dev --workspace=@blockade/server    # ws://localhost:3001 (+ GET /health)
 npm run dev --workspace=@blockade/web       # http://localhost:5173
 ```

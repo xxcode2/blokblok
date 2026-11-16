@@ -14,7 +14,9 @@ import { RoomManager, type Room } from "./rooms.js";
 import type { MatchHooks } from "./match.js";
 
 const PORT = Number(process.env.PORT ?? 3001);
-const SERVER_VERSION = "0.1.0";
+// Server version tracks the protocol version (1.1.0, turn-based): it is
+// what `welcome.serverVersion` and GET /health report.
+const SERVER_VERSION = PROTOCOL_VERSION;
 const MAX_INPUTS_PER_SEC = 30;
 const DISCONNECT_GRACE_MS = 30_000;
 const VALID_GRID_SIZES = [12, 20, 30, 40];
