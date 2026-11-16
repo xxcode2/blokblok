@@ -131,10 +131,36 @@ npm run dev --workspace=@blockade/web       # web on http://localhost:5173
 ## What works (milestone 1)
 - Core engine: grid/edge model, movement, blockades, BFS validation, energy,
   Race mode, timer, scoring, AI (Easy/Normal/Hard), protocol types. Unit tests pass.
+  - Animation support in the engine: `tryMove` buffers inputs during the
+    move cooldown (latest wins, so holding a direction glides instead of
+    stuttering); `PlayerState.anim` carries the in-flight move (from→to,
+    startTick, durationMs) and `BlockadeState.placedTick/deployDurationMs`
+    carry the grow-in window; `interpolatedPosition()` /
+    `blockadeDeployProgress()` give clients eased 0..1 progress. Delta
+    events include `collide` (illegal move feedback) and `win`.
+  - Engine note: the tick counter field is `tickCount` (the `tick(nowMs)`
+    wall-clock entry point owns the name `tick`).
 - Server: authoritative 20-tick sim, rooms by 6-char code, 1v1 matchmaking queue,
   reconnect tokens, snapshots + deltas, match results (in-memory).
 - Web: menu, lobby, online 1v1, practice vs AI, local 2P, Canvas renderer,
   keyboard/mouse + touch controls, HUD, results screen.
+  - Animation (user quality bar): a single requestAnimationFrame loop drives
+    rendering — no setTimeout/Handler-driven animation. Orbs glide cell to
+    cell in 150 ms with easeOutCubic (renderer-side, plus optimistic
+    prediction for own online moves reconciled by snapshots); blockades grow
+    in centre-out over 250 ms with a glow pulse and a particle burst; grid
+    and background are pre-rendered once per resize, orb sprites once per
+    colour, particles are a fixed pool — no allocation in the draw loop.
+  - Verified 2026-11-16 (no browser automation on this VM, so no real
+    mouse/keyboard playtest — see below): `npm run build
+    --workspace=@blockade/web` exits 0 (tsc + vite); `vite dev` serves the
+    app on :5173; `apps/web/scripts/smoke-online.mjs` against the live
+    server passes 9/9 steps (hello, createRoom, joinRoom, ready, start,
+    countdown, matchStart, place→delta, 12 moves → result, winner score
+    454); `apps/web/scripts/smoke-queue.mjs` passes (queue → matchFound →
+    countdown → matchStart); `apps/web/scripts/verify-practice.mts`
+    passes (fixed-step 50 ms sim, tryMove buffering 16/19, Hard AI, button
+    placeAuto, practice match won by the scripted player).
 - Android: native Kotlin/Compose app (splash, menu, lobby, Canvas gameplay,
   touch joystick, drag blockade, haptics, Ktor WebSocket client, same protocol).
   Gradle project complete; **no APK was built on this VM (no Android SDK)** —
@@ -147,6 +173,13 @@ npm run dev --workspace=@blockade/web       # web on http://localhost:5173
 - Reconnect: works within a running match while the server process lives; no
   cross-restart persistence.
 - Sound: WebAudio beeps only (no music, no asset pipeline). Android: haptics only.
+- Web client: verified by protocol smoke tests + headless practice sim (see
+  above), NOT by a real browser playthrough — no browser automation exists
+  on this VM. Drag-to-place, swipe, joystick and the canvas visuals were
+  verified statically (input-helper unit checks in verify-practice.mts) and
+  the production bundle builds and serves; a human should click through
+  menu → practice → drag a blockade → finish a match in a real browser
+  before calling the web track done.
 
 ## What is NOT built (later phases)
 - 2v2 / FFA / Territory / Survival / Speed Rush / Team / Puzzle modes (spec §9:

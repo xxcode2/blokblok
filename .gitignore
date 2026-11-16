@@ -15,3 +15,5 @@ apps/web/dist/
 # Editor
 .vscode/
 .idea/
+
+*.tsbuildinfo
