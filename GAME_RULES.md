@@ -12,7 +12,7 @@
 - Goal: reach any cell in the opposite row (P1 → row 0, P2 → row N−1).
 - First player to step onto their goal row wins immediately.
 
-## Trophy mode (protocol 1.3.0)
+## Trophy mode (since protocol 1.2.0)
 - 2 or 4 players. The **trophy** sits on the centre cell of the grid:
   `(floor(N/2), floor(N/2))` — (6,6) on 12×12, (10,10) on 20×20.
 - Goal: be the first orb to step **onto the trophy cell**. Landing on it wins
@@ -34,7 +34,7 @@
 - The BFS fairness rule checks **all four** players: a blockade is illegal
   if it leaves any player without a path to the trophy.
 
-## Turns (protocol 1.3.0 — turn-based, no real-time play)
+## Turns (since protocol 1.1.0 — turn-based, no real-time play)
 - The match is played in turns. **Turn 1 belongs to Player 1 (blue).**
 - On your turn you may do **exactly ONE action**: move 1 cell
   (up, down, left, right) OR place 1 blockade.

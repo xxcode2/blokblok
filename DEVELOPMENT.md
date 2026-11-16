@@ -119,12 +119,12 @@ Cells are `(row, col)`, `0 <= row, col < N`. A blockade sits on **edges between 
 ## Game rules (summary — full rules in GAME_RULES.md)
 - Race to the Top, 1v1. P1 blue starts bottom row centre, goal = row 0. P2 red starts
   top row centre, goal = row `N-1`. First to any goal-row cell wins.
-- **Trophy mode (protocol 1.3.0):** 2 or 4 players; the trophy sits on the
+- **Trophy mode (since protocol 1.2.0):** 2 or 4 players; the trophy sits on the
   centre cell `(floor(N/2), floor(N/2))` — (6,6) on 12×12, (10,10) on 20×20.
   First orb to step onto it wins (reason `trophy`). 2P trophy keeps the Race
   spawns. 4P spawns: P1 bottom centre, P2 top centre, P3 left centre (green
   `#22c55e`), P4 right centre (amber `#f59e0b`). Race stays 2-player.
-- **Turn-based (protocol 1.3.0):** one action per turn — move 1 cell
+- **Turn-based (since protocol 1.1.0):** one action per turn — move 1 cell
   (up/down/left/right) OR place 1 blockade. Turn 1 belongs to P1. After a
   valid action the turn passes to the next player in seat order
   (P1→P2 in 2P, P1→P2→P3→P4→P1… in 4P), `turnNumber += 1`, and
