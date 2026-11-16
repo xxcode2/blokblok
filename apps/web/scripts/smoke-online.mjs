@@ -1,4 +1,4 @@
-// Online smoke test for the BLOCKADE ARENA web track — turn-based protocol 1.1.0.
+// Online smoke test for the BLOCKADE ARENA web track — turn-based protocol 1.3.0.
 // Drives the exact protocol from DEVELOPMENT.md through a running server
 // (ws://localhost:3001 by default) with two WebSocket clients, using the
 // shared core engine to pick legal moves. No browser needed.
@@ -171,6 +171,13 @@ try {
     throw new Error(`expected turnDeadlineMs in the future, got ${start.snapshot.turnDeadlineMs}`);
   }
   step(`turn 1 = A (P1/blue), turnNumber=1, deadline in ~${Math.round((start.snapshot.turnDeadlineMs - Date.now()) / 1000)}s`);
+  // Protocol 1.3.0: every player starts with 10 blockades left, and no
+  // player carries a score.
+  if (start.snapshot.players.some((p) => p.blockadesLeft !== 10)) {
+    throw new Error(`expected blockadesLeft=10 for all players, got ${JSON.stringify(start.snapshot.players.map((p) => p.blockadesLeft))}`);
+  }
+  if (start.snapshot.players.some((p) => "score" in p)) throw new Error("snapshot players must not carry score in protocol 1.3.0");
+  step("blockadesLeft=10 for every player at matchStart, no score on players");
 
   // Track the live state locally with the core engine so our moves are legal.
   // The mirror is kept in lockstep by applying the exact actions we send, in
@@ -256,10 +263,23 @@ try {
   step(`alternating turns played (${turnsPlayed} actions, ${blockadesPlaced} blockades by B)`);
 
   const result = await resultWait;
-  step(`result winnerId=${result.winnerId} reason=${result.reason} scores=${JSON.stringify(result.scores)}`);
+  step(`result winnerId=${result.winnerId} reason=${result.reason} durationMs=${result.durationMs} stats=${JSON.stringify(result.stats)}`);
   if (result.winnerId !== aId) throw new Error(`expected A to win, winner was ${result.winnerId}`);
   if (result.reason !== "goal") throw new Error(`expected reason goal, got ${result.reason}`);
-  if (result.scores[aId] <= 100) throw new Error(`expected winning score > 100, got ${result.scores[aId]}`);
+  // Protocol 1.3.0: no points — the result carries the winner, the win
+  // reason, the match duration and per-player stats (moves, blockades),
+  // and no `scores` field.
+  if (!(result.durationMs > 0)) throw new Error(`expected durationMs > 0, got ${result.durationMs}`);
+  if (!result.stats || (result.stats[aId]?.moves ?? 0) <= 0) {
+    throw new Error(`expected winner stats.moves > 0, got ${JSON.stringify(result.stats)}`);
+  }
+  if ("scores" in result) throw new Error(`result must not carry scores in protocol 1.3.0, got ${JSON.stringify(result.scores)}`);
+  if (turnsPlayed < 10) throw new Error(`expected >= 10 turns played, got ${turnsPlayed}`);
+  // Protocol 1.3.0: no `score` delta event may appear anywhere in the stream.
+  const sawScoreDelta = [...a.queue, ...b.queue].some(
+    (m) => m.type === "delta" && m.events.some((e) => e.k === "score"),
+  );
+  if (sawScoreDelta) throw new Error("server sent a score delta — removed in protocol 1.3.0");
 
   a.close();
   b.close();

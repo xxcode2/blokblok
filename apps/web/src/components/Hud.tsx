@@ -8,7 +8,7 @@
 import type { Orientation, Snapshot } from "@blockade/core";
 import { blockadeCost } from "@blockade/core";
 import type { RefObject } from "react";
-import { arenaModeOf } from "../game/mode";
+import { arenaModeOf, blockadesLeftOf } from "../game/mode";
 
 export interface HudProps {
   snap: Snapshot;
@@ -51,7 +51,17 @@ export function Hud(props: HudProps): React.ReactElement {
   const me = props.myId ? snap.players.find((p) => p.id === props.myId) : snap.players[0];
   const foe = props.myId ? snap.players.find((p) => p.id !== props.myId) : snap.players[1];
   const cost = blockadeCost(props.length);
-  const placeReady = props.canAct && me ? me.energy >= cost : false;
+  // Blockade cap (protocol 1.3.0): 10 per player per match. The quick-place
+  // button is disabled with a "Blok habis" hint once you are out.
+  const myBlocksLeft = me ? blockadesLeftOf(snap, me.id) : 0;
+  const placeReady = props.canAct && me ? me.energy >= cost && myBlocksLeft > 0 : false;
+  const placeTitle = !props.canAct
+    ? "Wait for your turn"
+    : myBlocksLeft <= 0
+      ? "Blok habis — you have used all 10 blockades"
+      : me && me.energy < cost
+        ? "Not enough energy"
+        : "Place a blockade ahead of you (B)";
 
   return (
     <div className="hud">
@@ -81,7 +91,9 @@ export function Hud(props: HudProps): React.ReactElement {
                   {isMe ? " (you)" : ""}
                   {isActive ? " ●" : ""}
                 </span>
-                <span className="hud-score">{p.score} pts</span>
+                <span className="hud-blockades" title="Blockades left this match (max 10 per player)">
+                  🧱 Blok: {blockadesLeftOf(snap, p.id)}/10
+                </span>
                 <div className="hud-progress" title={progressTitle}>
                   <div className="hud-progress-fill" style={{ width: `${Math.round(p.progress * 100)}%` }} />
                 </div>
@@ -137,27 +149,42 @@ export function Hud(props: HudProps): React.ReactElement {
           <span className="hud-cost">cost {cost}⚡</span>
         </div>
         {props.myId || snap.players.length === 1 ? (
-          <button
-            className="hud-place"
-            disabled={!placeReady}
-            onClick={() => me && props.onPlaceAuto(me.id)}
-            title={placeReady ? "Place a blockade ahead of you (B)" : props.canAct ? "Not enough energy" : "Wait for your turn"}
-          >
-            🧱 Place blockade
-          </button>
+          <>
+            <button
+              className="hud-place"
+              disabled={!placeReady}
+              onClick={() => me && props.onPlaceAuto(me.id)}
+              title={placeTitle}
+            >
+              🧱 Place blockade
+            </button>
+            <span className="hud-blocks-left" title="Blockades left this match (max 10 per player)">
+              Blok: {myBlocksLeft}/10{myBlocksLeft <= 0 ? " — Blok habis" : ""}
+            </span>
+          </>
         ) : (
           <>
             {snap.players.map((p) => {
               const pActive = p.id === snap.activePlayerId && snap.status === "playing";
+              const pBlocksLeft = blockadesLeftOf(snap, p.id);
+              const pCanPlace = pActive && p.energy >= cost && pBlocksLeft > 0;
               return (
                 <button
                   key={p.id}
                   className={`hud-place ${p.color}`}
-                  disabled={!pActive || p.energy < cost}
+                  disabled={!pCanPlace}
                   onClick={() => props.onPlaceAuto(p.id)}
-                  title={pActive ? `Place a blockade ahead of ${p.name}` : `Wait for ${p.name}'s turn`}
+                  title={
+                    !pActive
+                      ? `Wait for ${p.name}'s turn`
+                      : pBlocksLeft <= 0
+                        ? "Blok habis — all 10 blockades used"
+                        : p.energy < cost
+                          ? "Not enough energy"
+                          : `Place a blockade ahead of ${p.name} (Blok: ${pBlocksLeft}/10)`
+                  }
                 >
-                  🧱 {p.name}
+                  🧱 {p.name} · {pBlocksLeft}/10
                 </button>
               );
             })}

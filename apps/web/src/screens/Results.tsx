@@ -1,13 +1,13 @@
-// Results — spec §14: winner, match statistics, rating change, rematch,
-// return to menu.
+// Results — spec §14: winner, match statistics, rematch, return to menu.
+// Protocol 1.3.0: no points system — no scores, no rating change, only the
+// winner, the win reason, the match duration, and per-player stats
+// (moves, blockades placed).
 
 import type { MatchResult } from "./Game";
 
 export interface ResultsProps {
   result: MatchResult;
   myId: string;
-  ranked: boolean;
-  ratingDelta: number;
   rematchLabel: string;
   onRematch: () => void;
   onMenu: () => void;
@@ -53,7 +53,6 @@ export function Results(props: ResultsProps): React.ReactElement {
           <thead>
             <tr>
               <th>Player</th>
-              <th>Score</th>
               <th>Moves</th>
               <th>Blockades</th>
             </tr>
@@ -65,7 +64,6 @@ export function Results(props: ResultsProps): React.ReactElement {
                   <span className={`lobby-orb ${p.color}`} /> P{i + 1} · {p.name}
                   {p.id === myId ? " (you)" : ""}
                 </td>
-                <td>{result.scores[p.id] ?? 0}</td>
                 <td>{result.stats[p.id]?.moves ?? 0}</td>
                 <td>{result.stats[p.id]?.blockades ?? 0}</td>
               </tr>
@@ -74,12 +72,6 @@ export function Results(props: ResultsProps): React.ReactElement {
         </table>
 
         <p className="results-meta">Match length: {fmtDur(result.durationMs)}</p>
-        {props.ranked && (
-          <p className="results-rating">
-            Ranked-lite: {props.ratingDelta >= 0 ? "+" : ""}
-            {props.ratingDelta} pts
-          </p>
-        )}
 
         <div className="results-actions">
           <button className="btn primary big" onClick={props.onRematch}>

@@ -195,13 +195,6 @@ select:focus {
   margin: -6px 0 4px;
 }
 
-.ranked-points {
-  margin-left: auto;
-  color: var(--amber);
-  font-weight: 700;
-  font-size: 14px;
-}
-
 .menu-error {
   background: rgba(244, 63, 94, 0.14);
   border: 1px solid rgba(244, 63, 94, 0.5);
@@ -463,8 +456,8 @@ select:focus {
   text-overflow: ellipsis;
 }
 
-.hud-score {
-  color: var(--amber);
+.hud-blockades {
+  color: var(--cyan);
   font-weight: 700;
   font-size: 13px;
 }
@@ -574,6 +567,13 @@ select:focus {
 .hud-cost {
   align-self: center;
   color: var(--amber);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.hud-blocks-left {
+  align-self: center;
+  color: var(--cyan);
   font-size: 13px;
   font-weight: 700;
 }
@@ -879,15 +879,9 @@ select:focus {
   font-weight: 700;
 }
 
-.results-meta,
-.results-rating {
+.results-meta {
   color: var(--muted);
   margin: 0;
-}
-
-.results-rating {
-  color: var(--amber);
-  font-weight: 700;
 }
 
 .results-actions {

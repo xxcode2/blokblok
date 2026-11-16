@@ -26,18 +26,9 @@ function loadName(): string {
   }
 }
 
-function loadPoints(): number {
-  try {
-    return Number(localStorage.getItem("ba-points") ?? "0") || 0;
-  } catch {
-    return 0;
-  }
-}
-
 export function App(): React.ReactElement {
   const [screen, setScreen] = useState<Screen>("menu");
   const [name, setName] = useState(loadName());
-  const [points, setPoints] = useState(loadPoints());
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [serverError, setServerError] = useState<string | null>(null);
@@ -58,26 +49,14 @@ export function App(): React.ReactElement {
   const [queuePosition, setQueuePosition] = useState<number | null>(null);
 
   const [result, setResult] = useState<MatchResult | null>(null);
-  const [ratingDelta, setRatingDelta] = useState(0);
-  const [rankedMatch, setRankedMatch] = useState(false);
   const [rematchLabel, setRematchLabel] = useState("Play again");
 
   const netRef = useRef<NetClient | null>(null);
   const snapshotRef = useRef<Snapshot | null>(null); // latest snapshot for stale closures
   const choicesRef = useRef<MenuChoices | null>(null);
   const rematchRef = useRef<RematchKind>("none");
-  const rankedRef = useRef(false);
   const screenRef = useRef<Screen>("menu");
   screenRef.current = screen;
-
-  const savePoints = (p: number) => {
-    setPoints(p);
-    try {
-      localStorage.setItem("ba-points", String(p));
-    } catch {
-      /* storage unavailable */
-    }
-  };
 
   const onName = (n: string) => {
     setName(n);
@@ -88,22 +67,13 @@ export function App(): React.ReactElement {
     }
   };
 
-  const applyResult = useCallback(
-    (r: MatchResult) => {
-      if (screenRef.current !== "game") return;
-      let delta = 0;
-      if (rankedRef.current && mode === "online") {
-        if (r.winnerId === null) delta = 5;
-        else if (r.winnerId === myId) delta = 25;
-        else delta = -10;
-        savePoints(Math.max(0, loadPoints() + delta));
-      }
-      setRatingDelta(delta);
-      setResult(r);
-      setScreen("results");
-    },
-    [mode, myId],
-  );
+  // Protocol 1.3.0: no points system — the result carries the winner,
+  // the win reason, the match duration and per-player stats only.
+  const applyResult = useCallback((r: MatchResult) => {
+    if (screenRef.current !== "game") return;
+    setResult(r);
+    setScreen("results");
+  }, []);
 
   const handleServerMessage = useCallback(
     (msg: ServerMessage) => {
@@ -180,7 +150,6 @@ export function App(): React.ReactElement {
           applyResult({
             winnerId: msg.winnerId,
             reason: msg.reason,
-            scores: msg.scores,
             stats: msg.stats,
             durationMs: msg.durationMs,
             players: (snapshotRef.current?.players ?? []).map((p) => ({ id: p.id, name: p.name, color: p.color })),
@@ -209,9 +178,11 @@ export function App(): React.ReactElement {
                   ? "Not enough energy ⚡"
                   : msg.code === "NO_PATH"
                     ? "That would trap a player — illegal."
-                    : msg.code === "NOT_YOUR_TURN"
-                      ? "Not your turn yet — wait for the turn banner."
-                      : msg.message;
+                    : msg.code === "NO_BLOCKADES"
+                      ? "Blok habis — you have used all 10 blockades."
+                      : msg.code === "NOT_YOUR_TURN"
+                        ? "Not your turn yet — wait for the turn banner."
+                        : msg.message;
           if (screenRef.current === "game") {
             setServerError(label);
             window.setTimeout(() => setServerError(null), 3000);
@@ -282,8 +253,6 @@ export function App(): React.ReactElement {
     choicesRef.current = c;
     rematchRef.current = "practice";
     setRematchLabel("Practice again");
-    rankedRef.current = false;
-    setRankedMatch(false);
     setMode("practice");
     setEngine(eng);
     setMyId("p1");
@@ -307,8 +276,6 @@ export function App(): React.ReactElement {
     choicesRef.current = c;
     rematchRef.current = "local2p";
     setRematchLabel("Play again (local 2P)");
-    rankedRef.current = false;
-    setRankedMatch(false);
     setMode("local2p");
     setEngine(eng);
     setMyId("p1");
@@ -325,8 +292,6 @@ export function App(): React.ReactElement {
       choicesRef.current = c;
       rematchRef.current = "queue";
       setRematchLabel("Find a new match");
-      rankedRef.current = c.ranked;
-      setRankedMatch(c.ranked);
       setLobbyMode(c.mode);
       setLobbyPlayerCount(c.playerCount);
       const net = await ensureNet();
@@ -344,8 +309,6 @@ export function App(): React.ReactElement {
       choicesRef.current = c;
       rematchRef.current = "room";
       setRematchLabel("Create a new room");
-      rankedRef.current = c.ranked;
-      setRankedMatch(c.ranked);
       setLobbyMode(c.mode);
       setLobbyPlayerCount(c.playerCount);
       const net = await ensureNet();
@@ -361,8 +324,6 @@ export function App(): React.ReactElement {
       choicesRef.current = c;
       rematchRef.current = "room";
       setRematchLabel("Create a new room");
-      rankedRef.current = c.ranked;
-      setRankedMatch(c.ranked);
       setLobbyMode(c.mode);
       setLobbyPlayerCount(c.playerCount);
       const net = await ensureNet();
@@ -408,7 +369,6 @@ export function App(): React.ReactElement {
         <Menu
           name={name}
           onName={onName}
-          rankedPoints={points}
           onPlayOnline={playOnline}
           onCreateRoom={createRoom}
           onJoinRoom={joinRoom}
@@ -463,8 +423,6 @@ export function App(): React.ReactElement {
         <Results
           result={result}
           myId={myId}
-          ranked={rankedMatch}
-          ratingDelta={ratingDelta}
           rematchLabel={rematchLabel}
           onRematch={onRematch}
           onMenu={leaveToMenu}

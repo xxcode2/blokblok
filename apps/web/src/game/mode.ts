@@ -1,10 +1,10 @@
-// BLOCKADE ARENA — web-side helpers for the 1.2.0 arena modes.
-// Thin wrappers over the real core 1.2.0 API (GameMode, PLAYER_COLORS,
+// BLOCKADE ARENA — web-side helpers for the 1.3.0 arena modes.
+// Thin wrappers over the real core 1.3.0 API (GameMode, PLAYER_COLORS,
 // Snapshot.mode / playerCount / trophy, trophyCellFor) so the screens,
 // HUD and renderer share one spelling of each rule.
 
 import type { Dir, PlayerColor, Snapshot } from "@blockade/core";
-import { PLAYER_COLORS as CORE_COLORS, trophyCellFor } from "@blockade/core";
+import { MAX_BLOCKADES_PER_PLAYER, PLAYER_COLORS as CORE_COLORS, trophyCellFor } from "@blockade/core";
 
 /** Game mode: race to the goal row, or first to the centre trophy. */
 export type ArenaMode = "race" | "trophy";
@@ -46,6 +46,22 @@ export function playerCountOf(snap: Snapshot | null | undefined): number {
   const n = snap?.playerCount;
   if (n === 2 || n === 4) return n;
   return snap?.players.length ?? 2;
+}
+
+/**
+ * Blockades a player may still place this match (cap 10 per player,
+ * protocol 1.3.0). Prefers the wire field `PlayerState.blockadesLeft`
+ * when the server/engine sends it; otherwise derives it from the
+ * snapshot's blockade list (10 − blockades placed by this player), so
+ * the HUD stays correct against either shape.
+ */
+export function blockadesLeftOf(snap: Snapshot | null | undefined, playerId: string): number {
+  if (!snap) return MAX_BLOCKADES_PER_PLAYER;
+  const p = snap.players.find((x) => x.id === playerId);
+  const wire = (p as unknown as { blockadesLeft?: unknown } | undefined)?.blockadesLeft;
+  if (typeof wire === "number" && Number.isFinite(wire)) return Math.max(0, Math.floor(wire));
+  const placed = snap.blockades.filter((b) => b.playerId === playerId).length;
+  return Math.max(0, MAX_BLOCKADES_PER_PLAYER - placed);
 }
 
 /**

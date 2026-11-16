@@ -1,4 +1,4 @@
-// Matchmaking smoke test — turn-based protocol 1.1.0: two clients queue ->
+// Matchmaking smoke test — turn-based protocol 1.3.0: two clients queue ->
 // matchFound -> countdown -> matchStart (turn 1 = P1/blue, turnNumber 1,
 // 30 s deadline), then P1 moves once and the `turn` delta passes the turn
 // to P2. Run: node apps/web/scripts/smoke-queue.mjs
@@ -111,6 +111,12 @@ try {
     throw new Error(`expected turn 1 active=${p1.id} (P1/blue), got ${ms.snapshot.activePlayerId}`);
   }
   console.log(`  [ok] turn 1 = P1 (blue), turnNumber=1, deadline in ~${Math.round((ms.snapshot.turnDeadlineMs - Date.now()) / 1000)}s`);
+  // Protocol 1.3.0: every player starts with 10 blockades left, no score.
+  if (ms.snapshot.players.some((p) => p.blockadesLeft !== 10)) {
+    throw new Error(`expected blockadesLeft=10 for all players, got ${JSON.stringify(ms.snapshot.players.map((p) => p.blockadesLeft))}`);
+  }
+  if (ms.snapshot.players.some((p) => "score" in p)) throw new Error("snapshot players must not carry score in protocol 1.3.0");
+  console.log(`  [ok] blockadesLeft=10 for every player at matchStart, no score on players`);
   // P1 moves once (up, from the bottom row); the turn delta must pass the
   // turn to P2.
   const p1Client = a.playerId === p1.id ? a : b;

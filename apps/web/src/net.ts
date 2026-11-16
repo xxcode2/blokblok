@@ -3,11 +3,13 @@
 // queue, ready, start, input (move/place/placeAuto), ping, reconnect.
 // Auto-reconnects with the session token if the socket drops mid-match.
 //
-// Protocol 1.2.0: createRoom / queue / roomJoined / matchFound carry
+// Protocol 1.3.0: createRoom / queue / roomJoined / matchFound carry
 // `mode: "race" | "trophy"` and `playerCount: 2 | 4`; snapshots carry
 // `mode`, `playerCount` and `trophy: { row, col } | null`; the `win` delta
-// and `result` win reason may be "trophy". PROTOCOL_VERSION comes from
-// @blockade/core (1.2.0).
+// and `result` win reason may be "trophy". There is NO score anywhere in
+// 1.3.0 — no `score` on PlayerState, no `score` delta event, no `scores`
+// on `result`; players carry `blockadesLeft` (10 − blockades placed).
+// PROTOCOL_VERSION comes from @blockade/core (1.3.0).
 
 import type {
   ClientMessage,
@@ -127,8 +129,7 @@ export class NetClient {
       this.roomId = msg.roomId;
       this.roomCode = msg.roomCode;
       this.inMatch = true;
-      // 1.2.0: matchFound carries the arena mode + player count.
-      this.roomMode = msg.mode;
+      // 1.2.0: matchFound carries the arena mode + player count.      this.roomMode = msg.mode;
       this.roomPlayerCount = msg.playerCount;
     } else if (msg.type === "roomJoined") {
       this.roomId = msg.roomId;
@@ -269,9 +270,6 @@ export function applyDeltaToSnapshot(snap: Snapshot, events: DeltaEvent[]): Snap
       if (p) p.energy = e.energy;
     } else if (e.k === "timer") {
       next.timeLeftMs = e.timeLeftMs;
-    } else if (e.k === "score") {
-      const p = next.players.find((x) => x.id === e.playerId);
-      if (p) p.score = e.score;
     } else if (e.k === "turn") {
       // Turn-based (protocol 1.2.0): the turn passed — update who may act,
       // the turn number, and the deadline the turn-timer bar counts down from.

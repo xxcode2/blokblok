@@ -1,5 +1,6 @@
-// Main menu — spec §14: Play Online, Ranked-lite / Casual, Private Room,
-// Practice vs AI, Local 2P. Ranked-lite points live in localStorage only.
+// Main menu — spec §14: Play Online, Private Room, Practice vs AI,
+// Local 2P. Protocol 1.3.0: no points system — no Ranked-lite/Casual
+// toggle, no rating display.
 
 import { useState } from "react";
 import type { AiDifficulty } from "../ai";
@@ -8,7 +9,6 @@ import type { ArenaMode, ArenaPlayerCount } from "../game/mode";
 
 export interface MenuChoices {
   name: string;
-  ranked: boolean;
   gridSize: GridSize;
   durationSec: number;
   /** Game mode: race to the goal row, or first to the centre trophy. */
@@ -20,7 +20,6 @@ export interface MenuChoices {
 export interface MenuProps {
   name: string;
   onName: (n: string) => void;
-  rankedPoints: number;
   onPlayOnline: (c: MenuChoices) => void;
   onCreateRoom: (c: MenuChoices) => void;
   onJoinRoom: (c: MenuChoices, code: string) => void;
@@ -31,7 +30,6 @@ export interface MenuProps {
 }
 
 export function Menu(props: MenuProps): React.ReactElement {
-  const [ranked, setRanked] = useState(true);
   const [gridSize, setGridSize] = useState<GridSize>(12);
   const [durationSec, setDurationSec] = useState(180);
   const [joinCode, setJoinCode] = useState("");
@@ -42,7 +40,6 @@ export function Menu(props: MenuProps): React.ReactElement {
 
   const choices = (): MenuChoices => ({
     name: props.name.trim() || "Player",
-    ranked,
     gridSize,
     durationSec,
     mode,
@@ -117,16 +114,6 @@ export function Menu(props: MenuProps): React.ReactElement {
             👥 4 pemain
           </button>
           {mode === "race" && <span className="picker-note">Race locks to 2 players — pick Rebut Piala for 4.</span>}
-        </div>
-
-        <div className="mode-toggle" title="Ranked-lite: ±points per match, kept in this browser only">
-          <button className={ranked ? "active" : ""} onClick={() => setRanked(true)}>
-            ★ Ranked-lite
-          </button>
-          <button className={!ranked ? "active" : ""} onClick={() => setRanked(false)}>
-            ☺ Casual
-          </button>
-          <span className="ranked-points">Rating: {props.rankedPoints} pts</span>
         </div>
 
         {props.error && <div className="menu-error">{props.error}</div>}

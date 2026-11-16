@@ -24,7 +24,7 @@ import type { AiDifficulty } from "../ai";
 import { chooseAiAction } from "../ai";
 import type { NetClient } from "../net";
 import { BoardRenderer, type Preview } from "../game/render";
-import { arenaModeOf, dirTowardCell, isTrophyMode, playerLabel, trophyCell } from "../game/mode";
+import { arenaModeOf, blockadesLeftOf, dirTowardCell, isTrophyMode, playerLabel, trophyCell } from "../game/mode";
 import { extendEdge, isP1MoveKey, isP2MoveKey, joystickDir, keyToDir, pickEdge, swipeDir } from "../game/input";
 import { Hud } from "../components/Hud";
 import { sfx, isMuted, setMuted } from "../sound";
@@ -32,7 +32,6 @@ import { sfx, isMuted, setMuted } from "../sound";
 export interface MatchResult {
   winnerId: string | null;
   reason: string;
-  scores: Record<string, number>;
   stats: Record<string, { moves: number; blockades: number }>;
   durationMs: number;
   players: { id: string; name: string; color: "blue" | "red" | "green" | "amber" }[];
@@ -112,7 +111,6 @@ export function Game(props: GameProps): React.ReactElement {
         // win it was (trophy capture vs goal row). The server `result`
         // message (App) carries the authoritative reason when it arrives.
         reason: isTrophyMode(props.snapshot) ? "trophy" : "goal",
-        scores: Object.fromEntries(props.snapshot.players.map((p) => [p.id, p.score])),
         stats: Object.fromEntries(props.snapshot.players.map((p) => [p.id, { moves: 0, blockades: 0 }])),
         durationMs: (props.snapshot.durationSec - props.snapshot.timeLeftMs / 1000) * 1000,
         players: props.snapshot.players.map((p) => ({ id: p.id, name: p.name, color: p.color })),
@@ -201,6 +199,14 @@ export function Game(props: GameProps): React.ReactElement {
         showFlash("Not your turn yet");
         return;
       }
+      // Blockade cap (protocol 1.3.0): 10 per player per match. Out of
+      // blocks the drag preview is already red; this is the second gate —
+      // never send the placement, and the turn does NOT pass.
+      if (blockadesLeftOf(currentSnapshot(), playerId) <= 0) {
+        showFlash("Blok habis — you have used all 10 blockades");
+        sfx.error();
+        return;
+      }
       if (online) {
         net?.inputPlace(edge);
         sfx.place();
@@ -218,12 +224,14 @@ export function Game(props: GameProps): React.ReactElement {
               ? "That would trap a player — illegal"
               : res.code === "NOT_YOUR_TURN"
                 ? "Not your turn yet"
-                : "Invalid placement";
+                : res.code === "NO_BLOCKADES"
+                  ? "Blok habis — you have used all 10 blockades"
+                  : "Invalid placement";
         showFlash(msg);
         sfx.error();
       }
     },
-    [online, engine, net, showFlash, isTurnOf],
+    [online, engine, net, showFlash, isTurnOf, currentSnapshot],
   );
 
   const sendPlaceAuto = useCallback(
@@ -247,6 +255,14 @@ export function Game(props: GameProps): React.ReactElement {
         sfx.error();
         return;
       }
+      // Blockade cap (protocol 1.3.0): 10 per player per match. Out of
+      // blocks the quick-place button is disabled; this is the second gate
+      // (keyboard "B" included) — never send, turn does NOT pass.
+      if (blockadesLeftOf(snap, playerId) <= 0) {
+        showFlash("Blok habis — you have used all 10 blockades");
+        sfx.error();
+        return;
+      }
       if (online) {
         net?.inputPlaceAuto(dir, orientation, length);
         sfx.place();
@@ -262,7 +278,9 @@ export function Game(props: GameProps): React.ReactElement {
             ? "Not enough energy ⚡"
             : res.code === "NOT_YOUR_TURN"
               ? "Not your turn yet"
-              : "No valid placement ahead",
+              : res.code === "NO_BLOCKADES"
+                ? "Blok habis — you have used all 10 blockades"
+                : "No valid placement ahead",
         );
         sfx.error();
       }
@@ -402,7 +420,6 @@ export function Game(props: GameProps): React.ReactElement {
           propsRef.current.onResult({
             winnerId: s.winnerId,
             reason,
-            scores: Object.fromEntries(s.players.map((x) => [x.id, x.score])),
             stats: engine.stats(),
             durationMs: engine.durationMs(),
             players: s.players.map((x) => ({ id: x.id, name: x.name, color: x.color })),
@@ -467,7 +484,10 @@ export function Game(props: GameProps): React.ReactElement {
     const edge = pickEdge(fx, fy, n);
     if (edge) {
       dragRef.current = { start: edge, current: edge, playerId };
-      previewRef.current = { edge, valid: validatePreview(playerId, edge) === null };
+      // Out of blocks (10-cap, protocol 1.3.0): the preview shows red
+      // (unavailable) instead of green — placing is impossible.
+      const outOfBlocks = blockadesLeftOf(snap, playerId) <= 0;
+      previewRef.current = { edge, valid: !outOfBlocks && validatePreview(playerId, edge) === null };
     } else {
       swipeRef.current = { x: e.clientX, y: e.clientY, playerId };
     }
@@ -488,7 +508,8 @@ export function Game(props: GameProps): React.ReactElement {
     const current = extendEdge(drag.start, fx, fy, 4);
     if (current.row !== drag.current.row || current.col !== drag.current.col || current.len !== drag.current.len) {
       drag.current = current;
-      previewRef.current = { edge: current, valid: validatePreview(drag.playerId, current) === null };
+      const outOfBlocks = blockadesLeftOf(currentSnapshot(), drag.playerId) <= 0;
+      previewRef.current = { edge: current, valid: !outOfBlocks && validatePreview(drag.playerId, current) === null };
     }
   };
 

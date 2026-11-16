@@ -65,7 +65,7 @@ export function Lobby(props: LobbyProps): React.ReactElement {
           <div className="spinner" />
           <p>
             In the matchmaking queue
-            {props.queuePosition !== null ? ` — position #${props.queuePosition}` : ""}. Ranked-lite and casual
+            {props.queuePosition !== null ? ` — position #${props.queuePosition}` : ""}. All players
             share one queue in milestone 1.
           </p>
           <button className="btn" onClick={props.onCancelQueue}>

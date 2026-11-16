@@ -1,5 +1,5 @@
 // Headless verification of the web client's Game-screen logic (no DOM),
-// turn-based (protocol 1.1.0 race + protocol 1.2.0 trophy):
+// turn-based (protocol 1.3.0: no points system, hard 10-blockade cap):
 // - fixed-step 50ms simulation; movement is ONE discrete action per turn
 //   (no cooldowns, no input buffering — an out-of-turn or illegal action is
 //   rejected and the turn does NOT pass);
@@ -9,10 +9,13 @@
 // - trophy section: 4-player trophy mode (P1 vs 3 AI) — trophy on the
 //   centre cell, turns rotate P1→P2→P3→P4, win ONLY by reaching the trophy
 //   (winReason "trophy", winner on the trophy cell).
+// - blockade-cap section: the 10-per-player cap is enforced (11th placement
+//   rejected, blockadesLeft counts down 10 → 0).
 // Plus the pointer helpers from apps/web/src/game/input.ts.
 // Run: npx tsx apps/web/scripts/verify-practice.mts
 import { GameEngine, chooseAiAction, TURN_DURATION_MS } from "@blockade/core";
 import { pickEdge, extendEdge, swipeDir, joystickDir, keyToDir } from "../src/game/input.js";
+import { blockadesLeftOf } from "../src/game/mode.js";
 
 let failures = 0;
 function check(name: string, cond: boolean, extra = "") {
@@ -176,9 +179,88 @@ check(
 check("AI acted at most once per AI turn", Math.max(0, ...aiActionsPerTurn.values()) <= 1, ` (${aiActions} AI actions)`);
 check("AI took turns during the match", aiActions > 0, ` (${aiActions} AI actions)`);
 check("scripted P1 actions never failed", p1FailedActions === 0, ` (${p1FailedActions} failed of ${p1Actions})`);
-check("winner score > 100", (snap.players.find((p) => p.id === snap.winnerId)?.score ?? 0) > 100);
+check(
+  "winner decided by goal, match duration + stats tracked (no points)",
+  snap.winnerId === "p1" && eng.winReason === "goal" && eng.durationMs() > 0 && (eng.stats()["p1"]?.moves ?? 0) > 0,
+  ` (winner=${snap.winnerId}, reason=${eng.winReason}, durationMs=${eng.durationMs()}, p1Moves=${eng.stats()["p1"]?.moves ?? 0})`,
+);
+check(
+  "no score on players (protocol 1.3.0: points removed)",
+  snap.players.every((p) => !("score" in p)),
+);
+for (const p of snap.players) {
+  const placed = snap.blockades.filter((b) => b.playerId === p.id).length;
+  check(
+    `blockadesLeftOf(${p.id}) = 10 - placed`,
+    blockadesLeftOf(snap, p.id) === 10 - placed && p.blockadesLeft === 10 - placed,
+    ` (left=${blockadesLeftOf(snap, p.id)}, placed=${placed}, wire=${p.blockadesLeft})`,
+  );
+}
 check("blockades were placed during the match", snap.blockades.length > 0, ` (${snap.blockades.length})`);
 check("engine stats tracked", JSON.stringify(eng.stats()).includes("moves"));
+
+// --- blockade cap (protocol 1.3.0): 10 per player per match ----------------
+// Both players place whenever they can (54 distinct len-1 h-edges spread
+// over the board — a single edge can never trap anyone, so validatePlace
+// only fails on energy or the cap) and wiggle along their home row when
+// they cannot place, so the match cannot end early. Energy (+10/turn,
+// −20/place) forces regen turns, but over 400 turns both players must hit
+// the cap; the 11th placement is then rejected with NO_BLOCKADES.
+const cap = new GameEngine({ gridSize: 12, durationSec: 180 });
+cap.addPlayer("p1", "Cap-A");
+cap.addPlayer("p2", "Cap-B");
+cap.start(Date.now());
+const capEdges: { row: number; col: number; orientation: "h"; len: number }[] = [];
+for (let r = 2; r <= 10; r++) {
+  for (const c of [0, 2, 4, 6, 8, 10]) capEdges.push({ row: r, col: c, orientation: "h", len: 1 });
+}
+let capTurns = 0;
+while (cap.snapshot().status === "playing" && capTurns < 400) {
+  cap.tickMs(50, Date.now());
+  const s = cap.snapshot();
+  if (s.status !== "playing") break;
+  const active = s.activePlayerId;
+  capTurns++;
+  let placed = false;
+  for (const e of capEdges) {
+    if (cap.validatePlace(active, e) === null) {
+      placed = cap.place(active, e).ok;
+      break;
+    }
+  }
+  if (!placed) {
+    // Out of energy, out of edges, or at the cap: wiggle along the home
+    // row (P1 prefers down/left/right, P2 up/left/right) — never toward
+    // the goal, so the match cannot end while the cap is being probed.
+    const prefs: ("up" | "down" | "left" | "right")[] =
+      active === "p1" ? ["down", "left", "right", "up"] : ["up", "left", "right", "down"];
+    const legal = cap.legalMoves(active);
+    const dir = prefs.find((d) => legal.includes(d));
+    if (dir) cap.tryMove(active, dir);
+    else break;
+  }
+}
+const capSnap = cap.snapshot();
+for (const p of capSnap.players) {
+  const placed = capSnap.blockades.filter((b) => b.playerId === p.id).length;
+  check(`blockade cap: ${p.id} placed ${placed} <= 10`, placed <= 10, ` (${placed} placed)`);
+  check(
+    `blockadesLeftOf(${p.id}) = 10 - placed after cap probe`,
+    blockadesLeftOf(capSnap, p.id) === 10 - placed && p.blockadesLeft === 10 - placed,
+    ` (left=${p.blockadesLeft}, placed=${placed})`,
+  );
+}
+const capped = capSnap.players.filter((p) => capSnap.blockades.filter((b) => b.playerId === p.id).length >= 10);
+check("at least one player hit the 10-blockade cap", capped.length > 0, ` (${capped.map((p) => p.id).join(",") || "none"})`);
+for (const p of capped) {
+  const code = cap.validatePlace(p.id, { row: 5, col: 5, orientation: "h", len: 1 });
+  const isActive = capSnap.activePlayerId === p.id;
+  check(
+    `cap enforced: 11th blockade rejected for ${p.id}`,
+    code !== null && (!isActive || code === "NO_BLOCKADES" || code === "INVALID_BLOCKADE"),
+    ` (code=${code ?? "null"}, activeTurn=${isActive})`,
+  );
+}
 
 // --- trophy mode (protocol 1.2.0): scripted P1 vs 3 Hard AI ----------------
 // The core track lands `mode: "trophy"`, `playerCount` and `trophy` on the
@@ -299,7 +381,15 @@ if (trophySupported) {
     teng.winReason === "trophy",
     ` (winReason=${teng.winReason ?? "?"})`,
   );
-  check("trophy winner score > 100", (tWinner?.score ?? 0) > 100, ` (score=${tWinner?.score ?? 0})`);
+  check(
+    "trophy match duration and winner stats tracked (no points)",
+    teng.durationMs() > 0 && !!tSnap.winnerId && (teng.stats()[tSnap.winnerId]?.moves ?? 0) > 0,
+    ` (durationMs=${teng.durationMs()}, winnerMoves=${tSnap.winnerId ? teng.stats()[tSnap.winnerId]?.moves : "?"})`,
+  );
+  check(
+    "no score on trophy players (protocol 1.3.0: points removed)",
+    tSnap.players.every((p) => !("score" in p)),
+  );
 }
 
 console.log(failures === 0 ? "\nVERIFY PRACTICE: PASS" : `\nVERIFY PRACTICE: FAIL (${failures} failures)`);
