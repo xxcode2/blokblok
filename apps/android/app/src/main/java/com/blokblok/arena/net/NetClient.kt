@@ -290,6 +290,15 @@ fun applyDeltaToSnapshot(snap: com.blokblok.arena.game.Snapshot, events: List<co
             is com.blokblok.arena.game.DeltaEvent.Win -> {
                 next = next.copy(winnerId = e.winnerId, status = com.blokblok.arena.game.MatchStatus.FINISHED)
             }
+            is com.blokblok.arena.game.DeltaEvent.Turn -> {
+                // Turn passed (protocol 1.1.0): update whose turn it is, the
+                // turn number, and the new turn deadline.
+                next = next.copy(
+                    activePlayerId = e.activePlayerId,
+                    turnNumber = e.turnNumber,
+                    turnDeadlineMs = e.turnDeadlineMs,
+                )
+            }
         }
     }
     return next

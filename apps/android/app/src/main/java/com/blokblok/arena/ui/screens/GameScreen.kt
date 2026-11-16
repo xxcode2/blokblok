@@ -41,6 +41,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -68,6 +69,8 @@ import com.blokblok.arena.ui.GameViewModel
 import com.blokblok.arena.ui.MatchKind
 import com.blokblok.arena.ui.components.Hud
 import com.blokblok.arena.ui.components.Joystick
+import com.blokblok.arena.ui.components.TurnBanner
+import com.blokblok.arena.ui.components.TurnTimerBar
 import com.blokblok.arena.ui.theme.NeonBlue
 import com.blokblok.arena.ui.theme.NeonCyan
 import com.blokblok.arena.ui.theme.NeonRed
@@ -174,6 +177,28 @@ fun GameScreen(
     val myColor = if (me?.color == PlayerColor.RED) NeonRed else NeonBlue
     val foeColor = if (foe?.color == PlayerColor.RED) NeonRed else NeonBlue
 
+    // Turn state (protocol 1.1.0). Online / practice: only the active
+    // player may act. Local 2P: either player acts on their own turn
+    // (the engine rejects off-turn inputs); the board is never dimmed.
+    val isLocal2P = kind == MatchKind.LOCAL_2P
+    val activeId = snap?.activePlayerId
+    val turnNumber = snap?.turnNumber ?: 1
+    val inputEnabled = snap == null || isLocal2P || activeId == myId
+    val activePlayer = snap?.players?.find { it.id == activeId }
+    val turnLabel = when {
+        snap == null -> "Menunggu giliran"
+        isLocal2P -> if (activePlayer?.color == PlayerColor.RED) "Giliran P2" else "Giliran P1"
+        activeId == myId -> "Giliran kamu"
+        else -> "Giliran lawan"
+    }
+    val bannerColor = when (activePlayer?.color) {
+        PlayerColor.RED -> NeonRed
+        PlayerColor.BLUE -> NeonBlue
+        null -> NeonCyan
+    }
+    // Drag-to-place acts for the active player in local 2P, else for me.
+    val dragPlayerId = if (isLocal2P) activeId ?: myId else myId
+
     Column(
         modifier = Modifier.fillMaxSize().background(Color(0xFF0A0E14)),
     ) {
@@ -191,18 +216,9 @@ fun GameScreen(
             connection = connection,
             latencyMs = null,
         )
-        // Cooldown chips.
-        Row(modifier = Modifier.padding(horizontal = 12.dp)) {
-            val moveCd = me?.moveCooldownMs ?: 0
-            val placeCd = me?.placeCooldownMs ?: 0
-            if (placeCd > 0) {
-                Text("Place ready in ${(placeCd + 99) / 1000}s", color = TextSecondary, fontSize = 12.sp)
-                Spacer(Modifier.width(16.dp))
-            }
-            if (moveCd > 0) {
-                Text("Move cooling down…", color = TextSecondary, fontSize = 12.sp)
-            }
-        }
+        // Turn banner + 30 s turn timer (protocol 1.1.0).
+        TurnBanner(label = turnLabel, turnNumber = turnNumber, activeColor = bannerColor)
+        TurnTimerBar(turnDeadlineMs = snap?.turnDeadlineMs ?: 0L, nowMs = frameNowMs)
 
         // Board area.
         BoxWithConstraints(modifier = Modifier.weight(1f).fillMaxSize()) {
@@ -222,15 +238,18 @@ fun GameScreen(
                     Canvas(
                         modifier = Modifier
                             .size(boardDp)
-                            .pointerInput(currentSnap.gridSize, kind) {
+                            .alpha(if (inputEnabled) 1f else 0.45f)
+                            .pointerInput(currentSnap.gridSize, kind, inputEnabled) {
                                 detectDragGestures(
                                     onDragStart = { offset ->
+                                        // Turn-based: no board input when it is not your turn.
+                                        if (!inputEnabled) return@detectDragGestures
                                         val (fx, fy) = renderer.pointToCell(offset.x, offset.y)
                                         val edge = pickEdge(fx, fy, currentSnap.gridSize)
                                         if (edge != null) {
                                             dragMode = DragMode.BLOCKADE
                                             dragStartEdge = edge
-                                            val valid = validateEdgeAgainstSnapshot(currentSnap, myId ?: "", edge) == null
+                                            val valid = validateEdgeAgainstSnapshot(currentSnap, dragPlayerId ?: "", edge) == null
                                             preview = Preview(edge, valid = valid)
                                         } else {
                                             dragMode = DragMode.SWIPE
@@ -246,7 +265,7 @@ fun GameScreen(
                                                 val start = dragStartEdge ?: return@detectDragGestures
                                                 val (fx, fy) = renderer.pointToCell(change.position.x, change.position.y)
                                                 val extended = extendEdge(start, fx, fy)
-                                                val valid = validateEdgeAgainstSnapshot(currentSnap, myId ?: "", extended) == null
+                                                val valid = validateEdgeAgainstSnapshot(currentSnap, dragPlayerId ?: "", extended) == null
                                                 preview = Preview(extended, valid = valid)
                                             }
                                             DragMode.SWIPE -> {
@@ -270,7 +289,7 @@ fun GameScreen(
                                         if (dragMode == DragMode.BLOCKADE) {
                                             val p = preview
                                             if (p != null && p.valid) {
-                                                vm.place(p.edge)
+                                                vm.place(p.edge, dragPlayerId)
                                                 if (settings.hapticsEnabled) {
                                                     haptics.performHapticFeedback(HapticFeedbackType.LongPress)
                                                 }
@@ -313,18 +332,24 @@ fun GameScreen(
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Joystick(onDirection = { dir -> vm.move(dir) })
+            Joystick(onDirection = { dir ->
+                if (!inputEnabled) return@Joystick
+                // Local 2P: the joystick drives whoever's turn it is.
+                if (kind == MatchKind.LOCAL_2P) vm.move(dir, activeId) else vm.move(dir)
+            })
             Spacer(Modifier.weight(1f))
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("Quick place", color = TextSecondary, fontSize = 11.sp)
                 Row {
                     Button(
                         onClick = { vm.placeAuto(Dir.UP, Orientation.H, 2) },
+                        enabled = inputEnabled,
                         colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color(0xFF06202A)),
                     ) { Text("━ H", fontWeight = FontWeight.Bold) }
                     Spacer(Modifier.width(8.dp))
                     Button(
                         onClick = { vm.placeAuto(Dir.UP, Orientation.V, 2) },
+                        enabled = inputEnabled,
                         colors = ButtonDefaults.buttonColors(containerColor = NeonCyan, contentColor = Color(0xFF06202A)),
                     ) { Text("┃ V", fontWeight = FontWeight.Bold) }
                 }

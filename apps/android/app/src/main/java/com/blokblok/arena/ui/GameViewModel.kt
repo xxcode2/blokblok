@@ -11,6 +11,8 @@ import com.blokblok.arena.data.ArenaSettings
 import com.blokblok.arena.game.AiDifficulty
 import com.blokblok.arena.game.Dir
 import com.blokblok.arena.game.Edge
+import com.blokblok.arena.game.EngineResult
+import com.blokblok.arena.game.ERR_NOT_YOUR_TURN
 import com.blokblok.arena.game.GameEngine
 import com.blokblok.arena.game.GameMode
 import com.blokblok.arena.game.LobbyPlayer
@@ -77,7 +79,10 @@ class GameViewModel : ViewModel() {
     private var engine: GameEngine? = null
     private var config: MatchConfig? = null
     private var localJob: Job? = null
-    private var aiJob: Job? = null
+    /** One-shot pending AI action for the current AI turn (see startLocal). */
+    private var aiPending: Job? = null
+    /** Turn number the AI has already acted on (prevents double actions). */
+    private var lastAiTurn: Int = 0
     private var myLocalId: String = "p1"
     private var localPlayer2Id: String = "p2"
 
@@ -122,35 +127,45 @@ class GameViewModel : ViewModel() {
             LobbyPlayer(localPlayer2Id, eng.snapshot().players[1].name, ready = true, isHost = false),
         )
         localJob?.cancel()
+        aiPending?.cancel()
+        lastAiTurn = 0
         localJob = viewModelScope.launch {
-            var last = System.currentTimeMillis()
             while (isActive) {
                 delay(50)
                 val now = System.currentTimeMillis()
-                val dt = (now - last).coerceIn(0, 250)
-                last = now
-                eng.tickMs(dt)
+                // tickAt (not tickMs): the engine needs the wall clock for
+                // the 30 s turn deadline / timeout auto-pass.
+                eng.tickAt(now)
                 val snap = eng.snapshot()
                 _snapshot.value = snap
+                // Turn-based AI: act ONCE per AI turn, ~500 ms after the
+                // turn starts. The engine + chooseAiAction both reject
+                // off-turn actions, so a stale/mis-fired job is a no-op.
+                if (cfg.kind == MatchKind.PRACTICE && cfg.difficulty != null &&
+                    snap.status == MatchStatus.PLAYING &&
+                    snap.activePlayerId == localPlayer2Id &&
+                    snap.turnNumber != lastAiTurn
+                ) {
+                    lastAiTurn = snap.turnNumber
+                    aiPending?.cancel()
+                    aiPending = viewModelScope.launch {
+                        delay(500)
+                        val cur = _snapshot.value ?: return@launch
+                        if (cur.status != MatchStatus.PLAYING) return@launch
+                        if (cur.activePlayerId != localPlayer2Id) return@launch
+                        if (cur.turnNumber != lastAiTurn) return@launch
+                        val engNow = engine ?: return@launch
+                        val action = chooseAiAction(engNow, localPlayer2Id, cfg.difficulty)
+                        when (action) {
+                            is AiAction.Move -> engNow.move(localPlayer2Id, action.dir)
+                            is AiAction.Place -> engNow.place(localPlayer2Id, action.edge)
+                            null -> Unit
+                        }
+                    }
+                }
                 if (snap.status == MatchStatus.FINISHED) {
                     finishLocal(snap)
                     break
-                }
-            }
-        }
-        if (cfg.kind == MatchKind.PRACTICE && cfg.difficulty != null) {
-            aiJob?.cancel()
-            aiJob = viewModelScope.launch {
-                while (isActive) {
-                    delay(650)
-                    val snap = _snapshot.value ?: continue
-                    if (snap.status != MatchStatus.PLAYING) continue
-                    val action = chooseAiAction(eng, localPlayer2Id, cfg.difficulty)
-                    when (action) {
-                        is AiAction.Move -> eng.tryMove(localPlayer2Id, action.dir)
-                        is AiAction.Place -> eng.place(localPlayer2Id, action.edge)
-                        null -> Unit
-                    }
                 }
             }
         }
@@ -158,11 +173,12 @@ class GameViewModel : ViewModel() {
 
     private fun finishLocal(snap: Snapshot) {
         val scores = snap.players.associate { it.id to it.score }
+        val engStats = engine?.stats()
         val stats = snap.players.associate {
-            it.id to PlayerStats(
-                moves = 0, // local engine does not track per-player move counts yet
+            it.id to (engStats?.get(it.id) ?: PlayerStats(
+                moves = 0,
                 blockades = snap.blockades.count { b -> b.playerId == it.id },
-            )
+            ))
         }
         _result.value = ServerMessage.Result(
             winnerId = snap.winnerId,
@@ -259,7 +275,13 @@ class GameViewModel : ViewModel() {
                 _error.value = "Opponent left the match."
             }
             is ServerMessage.Error -> {
-                _error.value = msg.message
+                // NOT_YOUR_TURN (protocol 1.1.0): the server rejected an
+                // off-turn input — surface it plainly, it is not fatal.
+                _error.value = if (msg.code == ERR_NOT_YOUR_TURN) {
+                    "Bukan giliranmu — tunggu giliran berikutnya."
+                } else {
+                    msg.message
+                }
             }
             is ServerMessage.Pong -> Unit
             is ServerMessage.Reconnected -> {
@@ -278,12 +300,11 @@ class GameViewModel : ViewModel() {
         val target = playerId ?: myLocalId
         val eng = engine
         if (eng != null) {
-            // tryMove buffers during the 150 ms cooldown (latest wins) —
-            // holding a direction glides smoothly, exactly like the server.
-            eng.tryMove(target, dir)
-            // Optimistic glide: the renderer animates immediately; the next
-            // engine snapshot (50 ms tick) confirms or corrects it.
-            onPredictedMove?.invoke(target, dir)
+            // Turn-based: exactly one action per turn; an off-turn or
+            // illegal move is rejected by the engine and the turn does NOT
+            // pass. Only glide optimistically when the move was accepted.
+            val res = eng.move(target, dir)
+            if (res is EngineResult.Ok) onPredictedMove?.invoke(target, dir)
             return
         }
         net?.inputMove(dir)
@@ -300,10 +321,12 @@ class GameViewModel : ViewModel() {
         net?.inputPlace(edge)
     }
 
-    fun placeAuto(dir: Dir, orientation: Orientation, len: Int) {
+    fun placeAuto(dir: Dir, orientation: Orientation, len: Int, playerId: String? = null) {
         val eng = engine
         if (eng != null) {
-            eng.placeAuto(myLocalId, dir, orientation, len)
+            // Local modes: quick-place acts for the player whose turn it is.
+            val target = playerId ?: eng.snapshot().activePlayerId.ifBlank { myLocalId }
+            eng.placeAuto(target, dir, orientation, len)
             return
         }
         net?.inputPlaceAuto(dir, orientation, len)
@@ -324,7 +347,7 @@ class GameViewModel : ViewModel() {
 
     fun leave() {
         localJob?.cancel()
-        aiJob?.cancel()
+        aiPending?.cancel()
         net?.disconnect()
         net = null
         engine = null

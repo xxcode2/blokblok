@@ -2,7 +2,11 @@ package com.blokblok.arena.game
 
 // BLOCKADE ARENA — authoritative game engine (Kotlin port).
 // Implements GAME_RULES.md exactly: Race to the Top, edge-model blockades,
-// BFS fairness rule, energy/cooldowns, timer + timeout scoring.
+// BFS fairness rule, turn-based play, timer + timeout scoring.
+// TURN-BASED model (protocol 1.1.0): one action per turn (move 1 cell OR
+// place 1 blockade), then the turn passes; the incoming player gains
+// ENERGY_PER_TURN energy (cap 100); a turn expires after TURN_DURATION_MS
+// and auto-passes with no other penalty. No cooldowns, no input buffering.
 // Deterministic, no I/O. Ticked at 20/s (50 ms steps) locally and by the
 // server. Mirrors packages/core/src/engine.ts line for line in behaviour.
 
@@ -13,7 +17,6 @@ sealed interface EngineResult {
 
 sealed interface TryMoveResult {
     data object Ok : TryMoveResult
-    data object Buffered : TryMoveResult
     data class Err(val code: String, val message: String) : TryMoveResult
 }
 
@@ -29,12 +32,9 @@ internal class PlayerInternal(
     var row: Int,
     var col: Int,
     var energy: Double,
-    var moveCooldownMs: Long,
-    var placeCooldownMs: Long,
     var score: Int,
     var moves: Int,
     var blockadesPlaced: Int,
-    var bufferedDir: Dir?,
     var anim: MoveAnim?,
 )
 
@@ -55,6 +55,15 @@ class GameEngine(
         private set
     var startedAtMs: Long = 0
         private set
+    /** Id of the player whose turn it is (P1/blue first). */
+    var activePlayerId: String = ""
+        private set
+    /** Current turn number, starting at 1. */
+    var turnNumber: Int = 1
+        private set
+    /** Epoch ms when the current turn expires. */
+    var turnDeadlineMs: Long = 0L
+        private set
 
     private val players = mutableListOf<PlayerInternal>()
     private val blocked = HashSet<String>()
@@ -62,6 +71,10 @@ class GameEngine(
     private var elapsedMs: Long = 0
     private var clockMs: Long = 0
     private var lastTickMs: Long = 0
+    /** Engine wall clock (epoch ms) driving turn deadlines. Set by start()
+     *  and tickAt(); tickMs() advances it by dtMs when no wall clock is
+     *  supplied, so a turn auto-passes even if ticks were delayed. */
+    private var currentNowMs: Long = 0
     private val pendingEvents = mutableListOf<DeltaEvent>()
     private val retainedEvents = ArrayDeque<Pair<Long, DeltaEvent>>()
 
@@ -74,17 +87,20 @@ class GameEngine(
             eng.status = snap.status
             eng.timeLeftMs = snap.timeLeftMs
             eng.winnerId = snap.winnerId
+            eng.turnNumber = snap.turnNumber
+            eng.turnDeadlineMs = snap.turnDeadlineMs
             for (ps in snap.players) {
                 eng.players += PlayerInternal(
                     id = ps.id, name = ps.name, color = ps.color,
                     row = ps.row, col = ps.col, energy = ps.energy.toDouble(),
-                    moveCooldownMs = ps.moveCooldownMs, placeCooldownMs = ps.placeCooldownMs,
                     score = ps.score, moves = 0, blockadesPlaced = 0,
-                    bufferedDir = null,
                     anim = ps.anim?.let {
                         MoveAnim(it.fromRow, it.fromCol, it.toRow, it.toCol, it.startTick, it.durationMs)
                     },
                 )
+            }
+            eng.activePlayerId = snap.activePlayerId.ifBlank {
+                eng.players.firstOrNull()?.id ?: ""
             }
             for (b in snap.blockades) {
                 eng.blockades += b.copy(edges = b.edges.map { it.copy() })
@@ -122,10 +138,11 @@ class GameEngine(
         val p = PlayerInternal(
             id = id, name = name, color = color,
             row = if (idx == 0) gridSize - 1 else 0, col = centre,
-            energy = MAX_ENERGY.toDouble(), moveCooldownMs = 0, placeCooldownMs = 0,
-            score = 0, moves = 0, blockadesPlaced = 0, bufferedDir = null, anim = null,
+            energy = MAX_ENERGY.toDouble(),
+            score = 0, moves = 0, blockadesPlaced = 0, anim = null,
         )
         players += p
+        if (idx == 0) activePlayerId = id
         return playerState(p)
     }
 
@@ -140,19 +157,50 @@ class GameEngine(
         elapsedMs = 0
         timeLeftMs = durationSec * 1000L
         lastTickMs = nowMs
-        for (p in players) {
-            p.moveCooldownMs = 0
-            p.placeCooldownMs = 0
-            p.bufferedDir = null
-        }
+        currentNowMs = nowMs
+        // P1 (blue) takes turn 1; the turn expires TURN_DURATION_MS later.
+        activePlayerId = players.firstOrNull()?.id ?: ""
+        turnNumber = 1
+        turnDeadlineMs = nowMs + TURN_DURATION_MS
     }
+
+    /** Wall-clock "now" for turn deadlines: the engine clock, falling back
+     *  to the system clock before the first tick/start. */
+    private fun nowMs(): Long =
+        if (currentNowMs > 0) currentNowMs else System.currentTimeMillis()
+
+    /** Pass the turn to the other player. The incoming player gains
+     *  ENERGY_PER_TURN energy (capped at MAX_ENERGY); the new turn expires
+     *  at [deadlineMs]. Returns the events it recorded. */
+    private fun passTurn(deadlineMs: Long): List<DeltaEvent> {
+        if (status != MatchStatus.PLAYING || players.size < 2) return emptyList()
+        val next = players.find { it.id != activePlayerId } ?: return emptyList()
+        activePlayerId = next.id
+        turnNumber += 1
+        turnDeadlineMs = deadlineMs
+        val events = mutableListOf<DeltaEvent>(
+            DeltaEvent.Turn(activePlayerId, turnNumber, turnDeadlineMs),
+        )
+        val before = next.energy.toInt()
+        next.energy = minOf(MAX_ENERGY.toDouble(), next.energy + ENERGY_PER_TURN)
+        if (next.energy.toInt() != before) {
+            events += DeltaEvent.Energy(next.id, next.energy.toInt())
+        }
+        record(events)
+        return events
+    }
+
+    /** Error code if [playerId] may not act right now, or null if it is
+     *  their turn. Invalid actions are rejected and the turn does NOT pass. */
+    private fun turnError(playerId: String): String? =
+        if (playerId != activePlayerId) ERR_NOT_YOUR_TURN else null
 
     /** Wall-clock tick entry point (20/s). Returns the delta events. */
     fun tickAt(nowMs: Long): List<DeltaEvent> {
         val dt = if (lastTickMs > 0) (nowMs - lastTickMs).coerceIn(0, 250) else 50L
         lastTickMs = nowMs
         if (status != MatchStatus.PLAYING) return emptyList()
-        return tickMs(dt)
+        return tickMs(dt, nowMs)
     }
 
     internal fun goalRow(p: PlayerInternal): Int = if (p.color == PlayerColor.BLUE) 0 else gridSize - 1
@@ -272,8 +320,8 @@ class GameEngine(
     fun validatePlace(playerId: String, edge: Edge): String? {
         val p = getPlayer(playerId) ?: return "NOT_IN_MATCH"
         if (status != MatchStatus.PLAYING) return "INVALID_BLOCKADE"
+        turnError(playerId)?.let { return it }
         if (edge.len < 1 || edge.len > MAX_BLOCKADE_LEN) return "INVALID_BLOCKADE"
-        if (p.placeCooldownMs > 0) return "ON_COOLDOWN"
         if (blockades.count { it.playerId == playerId } >= MAX_BLOCKADES_PER_PLAYER) return "INVALID_BLOCKADE"
         if (blockadeCost(edge.len) > p.energy) return "NO_ENERGY"
         val singles = edgesForBlockade(edge)
@@ -294,10 +342,12 @@ class GameEngine(
     }
 
     // -- actions -----------------------------------------------------------------
+    /** One action per turn: a successful move passes the turn. An invalid
+     *  move is rejected and the turn does NOT pass. */
     fun move(playerId: String, dir: Dir): EngineResult {
         val p = getPlayer(playerId) ?: return EngineResult.Err("NOT_IN_MATCH", "player not in match")
         if (status != MatchStatus.PLAYING) return EngineResult.Err("INVALID_MOVE", "match not playing")
-        if (p.moveCooldownMs > 0) return EngineResult.Err("ON_COOLDOWN", "move on cooldown")
+        turnError(playerId)?.let { return EngineResult.Err(it, "not your turn") }
         val d = DIRS[dir]!!
         val nr = p.row + d.first
         val nc = p.col + d.second
@@ -312,22 +362,20 @@ class GameEngine(
         p.row = nr
         p.col = nc
         p.moves++
-        p.moveCooldownMs = MOVE_COOLDOWN_MS
         val events: List<DeltaEvent> = listOf(DeltaEvent.Move(playerId, nr, nc, tickCount))
         record(events)
-        if (nr == goalRow(p)) finish(p.id, WinReason.GOAL)
-        return EngineResult.Ok(events)
+        if (nr == goalRow(p)) {
+            finish(p.id, WinReason.GOAL)
+            return EngineResult.Ok(events)
+        }
+        // Exactly one action per turn: the turn passes now.
+        val turnEvents = passTurn(nowMs() + TURN_DURATION_MS)
+        return EngineResult.Ok(events + turnEvents)
     }
 
-    /** Inputs during the move cooldown are BUFFERED (latest wins) and applied
-     *  by tick() when the cooldown ends — holding a direction glides smoothly. */
+    /** Move entry point (same rules as [move]; no buffering any more —
+     *  an off-turn or illegal move is rejected, never queued). */
     fun tryMove(playerId: String, dir: Dir): TryMoveResult {
-        val p = getPlayer(playerId) ?: return TryMoveResult.Err("NOT_IN_MATCH", "player not in match")
-        if (status != MatchStatus.PLAYING) return TryMoveResult.Err("NOT_IN_MATCH", "match not playing")
-        if (p.moveCooldownMs > 0) {
-            p.bufferedDir = dir
-            return TryMoveResult.Buffered
-        }
         return when (val res = move(playerId, dir)) {
             is EngineResult.Ok -> TryMoveResult.Ok
             is EngineResult.Err -> TryMoveResult.Err(res.code, res.message)
@@ -340,7 +388,7 @@ class GameEngine(
             val message = when (err) {
                 "NO_PATH" -> "placement would leave a player with no path to their goal"
                 "NO_ENERGY" -> "not enough energy"
-                "ON_COOLDOWN" -> "placement on cooldown"
+                ERR_NOT_YOUR_TURN -> "not your turn"
                 else -> "invalid blockade placement"
             }
             return EngineResult.Err(err, message)
@@ -358,14 +406,15 @@ class GameEngine(
         for (s in singles) blocked.add(edgeKey(s.row, s.col, s.orientation))
         blockades += blockade
         p.energy -= blockadeCost(edge.len)
-        p.placeCooldownMs = PLACE_COOLDOWN_MS
         p.blockadesPlaced++
         val events: List<DeltaEvent> = listOf(
             DeltaEvent.Blockade(blockade),
             DeltaEvent.Energy(playerId, p.energy.toInt()),
         )
         record(events)
-        return EngineResult.Ok(events)
+        // Exactly one action per turn: the turn passes now.
+        val turnEvents = passTurn(nowMs() + TURN_DURATION_MS)
+        return EngineResult.Ok(events + turnEvents)
     }
 
     fun tryPlace(playerId: String, edge: Edge): TryPlaceResult {
@@ -433,31 +482,26 @@ class GameEngine(
     }
 
     // -- simulation ---------------------------------------------------------------
-    /** Advance the simulation by dtMs (server ticks at 50ms; local client per frame). */
-    fun tickMs(dtMs: Long): List<DeltaEvent> {
+    /** Advance the simulation by dtMs (server ticks at 50ms; local client per frame).
+     *  [nowMs] (epoch ms, supplied by tickAt) drives turn-timeout checks; when
+     *  omitted the engine's internal clock advances by dtMs instead. There is
+     *  no per-second energy regen and no cooldown/buffer handling any more:
+     *  energy is regained only as +10 at the start of each of your turns
+     *  (passTurn), and a turn auto-passes after 30 s of inactivity. */
+    fun tickMs(dtMs: Long, nowMs: Long? = null): List<DeltaEvent> {
         if (status != MatchStatus.PLAYING) return emptyList()
         tickCount++
         clockMs += dtMs
         elapsedMs += dtMs
         timeLeftMs = maxOf(0L, durationSec * 1000L - elapsedMs)
+        currentNowMs = nowMs ?: currentNowMs + dtMs
         val ownEvents = mutableListOf<DeltaEvent>()
-        val moveEvents = mutableListOf<DeltaEvent>()
-        for (p in players) {
-            p.moveCooldownMs = maxOf(0L, p.moveCooldownMs - dtMs)
-            p.placeCooldownMs = maxOf(0L, p.placeCooldownMs - dtMs)
-            val before = p.energy
-            p.energy = minOf(MAX_ENERGY.toDouble(), p.energy + ENERGY_REGEN_PER_SEC * dtMs / 1000.0)
-            if (p.energy.toInt() != before.toInt()) {
-                ownEvents += DeltaEvent.Energy(p.id, p.energy.toInt())
-            }
-        }
-        for (p in players) {
-            if (p.bufferedDir != null && p.moveCooldownMs <= 0) {
-                val dir = p.bufferedDir!!
-                p.bufferedDir = null
-                val res = move(p.id, dir)
-                if (res is EngineResult.Ok) moveEvents += res.events
-                if (status != MatchStatus.PLAYING) break
+        // Turn timeout: auto-pass with no other penalty. The deadline advances
+        // by 30 s per pass, so a long stall passes the turn repeatedly.
+        // (passTurn records its own Turn/Energy events.)
+        if (turnDeadlineMs > 0) {
+            while (status == MatchStatus.PLAYING && currentNowMs >= turnDeadlineMs) {
+                passTurn(turnDeadlineMs + TURN_DURATION_MS)
             }
         }
         if (timeLeftMs <= 0) {
@@ -467,7 +511,7 @@ class GameEngine(
             ownEvents += DeltaEvent.Timer(timeLeftMs)
         }
         record(ownEvents)
-        return moveEvents + ownEvents
+        return ownEvents
     }
 
     private fun finish(winnerId: String?, reason: WinReason) {
@@ -545,8 +589,6 @@ class GameEngine(
             id = p.id, name = p.name, color = p.color,
             row = p.row, col = p.col,
             energy = p.energy.toInt(),
-            moveCooldownMs = p.moveCooldownMs,
-            placeCooldownMs = p.placeCooldownMs,
             score = p.score,
             progress = progress(p),
             anim = animOut,
@@ -563,6 +605,9 @@ class GameEngine(
         players = players.map { playerState(it) },
         blockades = blockades.map { it.copy(edges = it.edges.map { e -> e.copy() }) },
         winnerId = winnerId,
+        activePlayerId = activePlayerId,
+        turnNumber = turnNumber,
+        turnDeadlineMs = turnDeadlineMs,
     )
 
     fun stats(): Map<String, PlayerStats> {
@@ -580,8 +625,8 @@ class GameEngine(
 fun validateEdgeAgainstSnapshot(snap: Snapshot, playerId: String, edge: Edge): String? {
     val p = snap.players.find { it.id == playerId } ?: return "NOT_IN_MATCH"
     if (snap.status != MatchStatus.PLAYING) return "INVALID_BLOCKADE"
+    if (snap.activePlayerId.isNotBlank() && playerId != snap.activePlayerId) return ERR_NOT_YOUR_TURN
     if (edge.len < 1 || edge.len > MAX_BLOCKADE_LEN) return "INVALID_BLOCKADE"
-    if (p.placeCooldownMs > 0) return "ON_COOLDOWN"
     if (snap.blockades.count { it.playerId == playerId } >= MAX_BLOCKADES_PER_PLAYER) return "INVALID_BLOCKADE"
     if (blockadeCost(edge.len) > p.energy) return "NO_ENERGY"
     val n = snap.gridSize

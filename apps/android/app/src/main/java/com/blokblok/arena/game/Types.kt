@@ -26,8 +26,6 @@ data class PlayerState(
     val row: Int,
     val col: Int,
     val energy: Int,
-    val moveCooldownMs: Long,
-    val placeCooldownMs: Long,
     val score: Int,
     /** 0..1 fraction of the way to the goal row. */
     val progress: Float,
@@ -63,6 +61,12 @@ data class Snapshot(
     val players: List<PlayerState>,
     val blockades: List<BlockadeState>,
     val winnerId: String?,
+    /** Id of the player whose turn it is (P1/blue first, turn 1). */
+    val activePlayerId: String,
+    /** Current turn number, starting at 1. Increments on every turn pass. */
+    val turnNumber: Int,
+    /** Epoch ms when the current turn expires (30 s after it started). */
+    val turnDeadlineMs: Long,
 )
 
 sealed interface DeltaEvent {
@@ -76,6 +80,13 @@ sealed interface DeltaEvent {
         val winnerId: String?,
         val reason: WinReason,
         val tick: Long,
+    ) : DeltaEvent
+    /** Turn passed: it is now [activePlayerId]'s turn ([turnNumber]),
+     *  which expires at [turnDeadlineMs] (epoch ms). */
+    data class Turn(
+        val activePlayerId: String,
+        val turnNumber: Int,
+        val turnDeadlineMs: Long,
     ) : DeltaEvent
 }
 
@@ -100,20 +111,26 @@ data class MatchResultData(
 data class PlayerStats(val moves: Int, val blockades: Int)
 
 // ---------------------------------------------------------------------------
-// Tunables (GAME_RULES.md)
+// Tunables (GAME_RULES.md) — TURN-BASED model, protocol 1.1.0.
+// One action per turn (move 1 cell OR place 1 blockade); the turn then
+// passes. No move/place cooldowns and no input buffering any more.
 // ---------------------------------------------------------------------------
-const val PROTOCOL_VERSION = "1.0.0"
-const val MOVE_COOLDOWN_MS = 150L
-const val PLACE_COOLDOWN_MS = 500L
+const val PROTOCOL_VERSION = "1.1.0"
+const val TURN_DURATION_MS = 30000L
+/** Energy gained by the incoming player at the start of each of their turns. */
+const val ENERGY_PER_TURN = 10
 const val MAX_ENERGY = 100
-const val ENERGY_REGEN_PER_SEC = 5.0
 const val MAX_BLOCKADES_PER_PLAYER = 10
 const val MAX_BLOCKADE_LEN = 4
 const val DEFAULT_DURATION_SEC = 180
 const val DEFAULT_GRID_SIZE = 12
-const val MOVE_ANIM_MS = MOVE_COOLDOWN_MS
+/** Animation-only glide duration (150 ms, eased) — NOT a cooldown. */
+const val MOVE_ANIM_MS = 150L
 const val DEPLOY_MS = 250L
 const val SERVER_TICK_MS = 50L
+
+/** Error code when a player acts while it is not their turn. */
+const val ERR_NOT_YOUR_TURN = "NOT_YOUR_TURN"
 
 fun blockadeCost(len: Int): Int = if (len >= 3) 35 else 20
 

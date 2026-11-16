@@ -3,6 +3,9 @@ package com.blokblok.arena.game
 // BLOCKADE ARENA — AI opponents (practice mode).
 // Kotlin port of packages/core/src/ai.ts. AI uses only legal actions through
 // the public engine API — same rules as humans.
+// TURN-BASED (protocol 1.1.0): the AI picks a SINGLE move-or-blockade action
+// per turn (one call per AI turn, enforced by the caller + the turn guard
+// in chooseAiAction); the engine then passes the turn.
 // Difficulties: Easy / Normal / Hard (no Expert in milestone 1).
 
 enum class AiDifficulty { EASY, NORMAL, HARD }
@@ -64,7 +67,13 @@ private fun bestBlockingPlacement(engine: GameEngine, me: String, foe: String): 
 }
 
 fun chooseAiAction(engine: GameEngine, playerId: String, difficulty: AiDifficulty): AiAction? {
-    val foe = engine.snapshot().players.find { it.id != playerId } ?: return null
+    // Turn-based: the AI acts at most once per turn, and only on its own turn.
+    // The caller (GameViewModel) invokes this once per AI turn; this guard
+    // makes an off-turn call a no-op even if the caller mis-fires.
+    val snap = engine.snapshot()
+    if (snap.status != MatchStatus.PLAYING) return null
+    if (snap.activePlayerId.isNotBlank() && snap.activePlayerId != playerId) return null
+    val foe = snap.players.find { it.id != playerId } ?: return null
     val me = engine.getPlayer(playerId) ?: return null
     val legal = engine.legalMoves(playerId)
     val step = engine.nextStepTowardGoal(playerId)

@@ -1,10 +1,13 @@
 package com.blokblok.arena.net
 
-// BLOCKADE ARENA — WebSocket protocol (JSON text frames).
+// BLOCKADE ARENA — WebSocket protocol (JSON text frames), version 1.1.0.
 // Kotlin port of the DEVELOPMENT.md message table + packages/core/src/types.ts.
 // The client sends inputs only; the server is authoritative and sends
 // snapshots/deltas. Parsing is manual JsonObject mapping (no polymorphic
 // serializer) so a single unknown field can never crash the client.
+// Turn-based (1.1.0): snapshots carry activePlayerId / turnNumber /
+// turnDeadlineMs, deltas carry a "turn" event, and acting off-turn is
+// rejected with error code NOT_YOUR_TURN. No cooldown fields any more.
 
 import com.blokblok.arena.game.BlockadeState
 import com.blokblok.arena.game.DeltaEvent
@@ -234,8 +237,6 @@ private fun parsePlayer(o: JsonObject): PlayerState = PlayerState(
     row = o.int("row"),
     col = o.int("col"),
     energy = o.int("energy"),
-    moveCooldownMs = o.long("moveCooldownMs"),
-    placeCooldownMs = o.long("placeCooldownMs"),
     score = o.int("score"),
     progress = (o["progress"]?.jsonPrimitive?.content?.toFloatOrNull() ?: 0f),
     anim = parseMoveAnim(o.obj("anim")),
@@ -253,17 +254,25 @@ private fun parseBlockade(o: JsonObject): BlockadeState {
     )
 }
 
-private fun parseSnapshot(o: JsonObject): Snapshot = Snapshot(
-    tick = o.long("tick"),
-    status = parseStatus(o.str("status")),
-    mode = GameMode.RACE,
-    gridSize = o.int("gridSize", 12),
-    durationSec = o.int("durationSec", 180),
-    timeLeftMs = o.long("timeLeftMs"),
-    players = o.arr("players")?.map { parsePlayer(it.jsonObject) } ?: emptyList(),
-    blockades = o.arr("blockades")?.map { parseBlockade(it.jsonObject) } ?: emptyList(),
-    winnerId = o.nullableStr("winnerId"),
-)
+private fun parseSnapshot(o: JsonObject): Snapshot {
+    val players = o.arr("players")?.map { parsePlayer(it.jsonObject) } ?: emptyList()
+    return Snapshot(
+        tick = o.long("tick"),
+        status = parseStatus(o.str("status")),
+        mode = GameMode.RACE,
+        gridSize = o.int("gridSize", 12),
+        durationSec = o.int("durationSec", 180),
+        timeLeftMs = o.long("timeLeftMs"),
+        players = players,
+        blockades = o.arr("blockades")?.map { parseBlockade(it.jsonObject) } ?: emptyList(),
+        winnerId = o.nullableStr("winnerId"),
+        // Turn-based (protocol 1.1.0). Fall back to P1 / turn 1 when the
+        // server omits the fields (pre-1.1.0 snapshot).
+        activePlayerId = o.str("activePlayerId").ifBlank { players.firstOrNull()?.id ?: "" },
+        turnNumber = o.int("turnNumber", 1),
+        turnDeadlineMs = o.long("turnDeadlineMs"),
+    )
+}
 
 private fun parseLobbyPlayer(o: JsonObject): LobbyPlayer = LobbyPlayer(
     id = o.str("id"),
@@ -284,6 +293,11 @@ private fun parseDelta(e: JsonObject): DeltaEvent? {
             e.nullableStr("winnerId"),
             parseWinReason(e.str("reason")),
             e.long("tick"),
+        )
+        "turn" -> DeltaEvent.Turn(
+            e.str("activePlayerId"),
+            e.int("turnNumber", 1),
+            e.long("turnDeadlineMs"),
         )
         else -> null
     }

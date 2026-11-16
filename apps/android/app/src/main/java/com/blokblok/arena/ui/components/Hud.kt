@@ -36,6 +36,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.blokblok.arena.game.Dir
+import com.blokblok.arena.game.TURN_DURATION_MS
 import com.blokblok.arena.game.joystickDir
 import com.blokblok.arena.ui.ConnectionState
 import com.blokblok.arena.ui.theme.NeonBlue
@@ -134,6 +135,67 @@ fun Hud(
                 Text("Energy $oppEnergy", color = TextSecondary, fontSize = 11.sp)
             }
         }
+    }
+}
+
+/** Turn banner (protocol 1.1.0): whose turn it is + the turn number.
+ *  [label] is e.g. "Giliran kamu", "Giliran lawan", or "Giliran P1"/"Giliran P2"
+ *  in local 2P; [activeColor] is the active player's orb colour. */
+@Composable
+fun TurnBanner(
+    label: String,
+    turnNumber: Int,
+    activeColor: Color,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(12.dp)
+                .clip(CircleShape)
+                .background(activeColor),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(label, color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+        Spacer(Modifier.width(8.dp))
+        Text("Giliran ke-$turnNumber", color = TextSecondary, fontSize = 14.sp)
+    }
+}
+
+/** Turn-timer bar: counts down the 30 s turn from [turnDeadlineMs] against
+ *  the frame clock [nowMs]. Red under 5 s. When no deadline is known yet
+ *  ([turnDeadlineMs] <= 0) the bar renders full with no countdown. */
+@Composable
+fun TurnTimerBar(
+    turnDeadlineMs: Long,
+    nowMs: Long,
+    modifier: Modifier = Modifier,
+) {
+    val hasDeadline = turnDeadlineMs > 0L
+    val remainingMs = if (hasDeadline) (turnDeadlineMs - nowMs).coerceAtLeast(0L) else TURN_DURATION_MS
+    val fraction = (remainingMs.toFloat() / TURN_DURATION_MS).coerceIn(0f, 1f)
+    val secs = (remainingMs + 999) / 1000 // ceil so the bar shows 30…1, never 0 early
+    Row(
+        modifier = modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        LinearProgressIndicator(
+            progress = { fraction },
+            modifier = Modifier.weight(1f).height(6.dp).clip(RoundedCornerShape(3.dp)),
+            color = if (remainingMs <= 5_000L) NeonRed else NeonCyan,
+            trackColor = Color(0xFF1E293B),
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            if (hasDeadline) "${secs}s" else "—",
+            color = if (remainingMs <= 5_000L) NeonRed else TextSecondary,
+            fontWeight = FontWeight.Bold,
+            fontSize = 12.sp,
+        )
     }
 }
 
