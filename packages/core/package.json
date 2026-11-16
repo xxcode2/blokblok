@@ -1,0 +1,1 @@
+{"description":"BLOCKADE ARENA shared game engine + protocol types (pure logic, no DOM).","exports":{".":"./dist/index.js","./package.json":"./package.json"},"license":"MIT","main":"./dist/index.js","name":"@blockade/core","scripts":{"build":"tsc -p tsconfig.json","test":"node --test dist/test/*.test.js"},"types":"./dist/index.d.ts","version":"0.1.0"}

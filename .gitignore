@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+*.local
+.DS_Store
+# Android
+apps/android/.gradle/
+apps/android/build/
+apps/android/*/build/
+apps/android/local.properties
+*.apk
+*.aab
+# Web
+apps/web/dist/
+# Editor
+.vscode/
+.idea/
